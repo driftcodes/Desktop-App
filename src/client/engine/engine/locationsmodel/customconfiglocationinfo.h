@@ -39,6 +39,10 @@ public:
     QSharedPointer<WireGuardConfig> getWireguardCustomConfig(const QString &endpointIp) const;
     bool isAllowFirewallAfterConnection() const;
     void selectNextNode();
+    // Starting from the current node, moves the selection to the first node whose protocol is
+    // `protocol` (case-insensitive, e.g. "tcp"). Returns false and leaves the selection unchanged
+    // when no resolved node uses that protocol.
+    bool selectNodeWithProtocol(const QString &protocol);
 
 
 signals:

@@ -181,4 +181,40 @@ void TestCustomConfigLocationInfo::testHostnameMultiIpRotation()
     QCOMPARE(info->getSelectedIp(), QString("10.0.0.1"));
 }
 
+void TestCustomConfigLocationInfo::testSelectNodeWithProtocolSkipsUdpRemotes()
+{
+    // Mixed profile: under a proxy only the TCP remote may be dialed.
+    auto info = makeOvpnCustomConfigLocationInfo(
+        "dev tun\nauth-user-pass\nremote 1.2.3.4 1194 udp\nremote 9.8.7.6 443 tcp\nremote 5.5.5.5 1195 udp\n");
+    QVERIFY(info);
+    info->resolveHostnames();
+
+    QCOMPARE(info->getSelectedProtocol(), QString("udp"));
+    QVERIFY(info->selectNodeWithProtocol("tcp"));
+    QCOMPARE(info->getSelectedIp(), QString("9.8.7.6"));
+    QCOMPARE(info->getSelectedProtocol(), QString("tcp"));
+
+    // Already on a TCP node: the selection stays put.
+    QVERIFY(info->selectNodeWithProtocol("TCP"));
+    QCOMPARE(info->getSelectedIp(), QString("9.8.7.6"));
+
+    // After a failure the walk advances, skips the UDP remotes and wraps back to the TCP one.
+    info->selectNextNode();
+    QVERIFY(info->selectNodeWithProtocol("tcp"));
+    QCOMPARE(info->getSelectedIp(), QString("9.8.7.6"));
+}
+
+void TestCustomConfigLocationInfo::testSelectNodeWithProtocolNoMatchKeepsSelection()
+{
+    auto info = makeOvpnCustomConfigLocationInfo("dev tun\nauth-user-pass\nremote 1.2.3.4 1194 udp\nremote 9.8.7.6 1195 udp\n");
+    QVERIFY(info);
+    info->resolveHostnames();
+    info->selectNextNode();
+    QCOMPARE(info->getSelectedIp(), QString("9.8.7.6"));
+
+    QVERIFY(!info->selectNodeWithProtocol("tcp"));
+    QCOMPARE(info->getSelectedIp(), QString("9.8.7.6"));
+    QCOMPARE(info->getSelectedProtocol(), QString("udp"));
+}
+
 QTEST_MAIN(TestCustomConfigLocationInfo)

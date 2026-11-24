@@ -72,6 +72,9 @@ enum class ConnectError {
     kLocalDnsServerNotAvailable = 17,
     kAdapterNotInstalled = 18,          // required VPN adapter/driver is not installed; terminal
     kOSServiceUnavailable = 19,         //
+    kProxyUnreachable = 20,             // the configured HTTP/SOCKS proxy did not accept a connection; terminal
+    kProxyRequiresTcp = 21,             // a proxy is configured but the attempt is not OpenVPN TCP; terminal
+    kRouteSetupFailure = 22,            // OpenVPN connected but could not install its routes; terminal
 };
 
 enum PROXY_SHARING_TYPE {

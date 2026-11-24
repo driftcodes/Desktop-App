@@ -46,6 +46,12 @@ private slots:
     void testOpenVpnCapabilities();
     void testRunOpenVpnCustomConfigDetailEmitsCustomConfigInvalid();
     void testRunOpenVpnEmptyDetailEmitsLaunchFailure();
+    void testLoopbackProxyRouteFixReplacesRedirectGateway();
+    void testLoopbackProxyRouteFixRespectsOptOut();
+    void testPrepareCustomTcpWithLoopbackProxyProbesAndAppliesFix();
+    void testPrepareTcpWithUnreachableProxyFails();
+    void testPrepareCustomUdpWithProxyDoesNotUseIt();
+    void testPrepareEmergencyTcpIgnoresProxy();
 private:
     Helper *helper_ = nullptr;
 

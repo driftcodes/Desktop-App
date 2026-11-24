@@ -28,6 +28,10 @@ ConnectErrorClassification classifyConnectError(ConnectError err, bool isAutomat
             return isAutomaticMode ? ConnectErrorClassification::Retry : ConnectErrorClassification::ErrorAfterDisconnect;
         case ConnectError::kPrivKeyPasswordFailure:
             return ConnectErrorClassification::ErrorAfterDisconnect;
+        // The tunnel came up without its routes. Another attempt would fail the same way, and failing
+        // over could pick a protocol that bypasses the configured proxy.
+        case ConnectError::kRouteSetupFailure:
+            return ConnectErrorClassification::ErrorAfterDisconnect;
         case ConnectError::kVpnServiceSetupFailure:
         case ConnectError::kHostsFileNotWritable:
         case ConnectError::kOSServiceUnavailable:
@@ -43,6 +47,8 @@ ConnectErrorClassification classifyConnectError(ConnectError err, bool isAutomat
         case ConnectError::kDnsServiceStartFailure:
         case ConnectError::kBlockedByOsPolicy:
         case ConnectError::kLocalDnsServerNotAvailable:
+        case ConnectError::kProxyUnreachable:
+        case ConnectError::kProxyRequiresTcp:
             return ConnectErrorClassification::Unknown;
     }
     return ConnectErrorClassification::Unknown;

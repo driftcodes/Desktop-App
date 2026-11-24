@@ -1,5 +1,6 @@
 #include "makeovpnfile.h"
 
+#include <QRegularExpression>
 #include <QString>
 
 #include "utils/extraconfig.h"
@@ -21,6 +22,82 @@ void MakeOVPNFile::appendDnsOverride(QString &config, const QString &dnsServer)
 {
     config += "\r\npull-filter ignore \"dhcp-option DNS\"\r\n";
     config += QString("dhcp-option DNS %1\r\n").arg(dnsServer);
+}
+
+namespace {
+
+// Directive tokens of one config line, quotes removed. Empty for blank and comment lines.
+QStringList directiveTokens(const QString &line)
+{
+    const QString trimmed = line.trimmed();
+    if (trimmed.isEmpty() || trimmed.startsWith('#') || trimmed.startsWith(';')) {
+        return QStringList();
+    }
+    QStringList tokens = trimmed.split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
+    for (QString &token : tokens) {
+        token.remove('"');
+        token.remove('\'');
+    }
+    // Directives may be written with a leading "--", as on the command line.
+    if (!tokens.isEmpty() && tokens.first().startsWith("--")) {
+        tokens.first().remove(0, 2);
+    }
+    return tokens;
+}
+
+} // namespace
+
+bool MakeOVPNFile::applyLoopbackProxyRouteFix(QString &config)
+{
+    const QStringList lines = config.split('\n');
+
+    QStringList kept;
+    kept.reserve(lines.size());
+    bool insideInlineBlock = false;
+    int removedRedirectGateway = 0;
+    for (const QString &line : lines) {
+        const QString trimmed = line.trimmed();
+        // Inline blocks (<ca>...</ca> and the like) hold key material, never directives.
+        if (insideInlineBlock) {
+            if (trimmed.startsWith("</")) {
+                insideInlineBlock = false;
+            }
+            kept << line;
+            continue;
+        }
+        if (trimmed.startsWith('<') && !trimmed.startsWith("</")) {
+            insideInlineBlock = true;
+            kept << line;
+            continue;
+        }
+
+        const QStringList tokens = directiveTokens(line);
+        if (!tokens.isEmpty()) {
+            const QString &directive = tokens.first();
+            if (directive.compare("route-nopull", Qt::CaseInsensitive) == 0 ||
+                directive.compare("route-noexec", Qt::CaseInsensitive) == 0 ||
+                (directive.compare("pull-filter", Qt::CaseInsensitive) == 0 && tokens.size() >= 3 &&
+                 tokens[1].compare("ignore", Qt::CaseInsensitive) == 0 &&
+                 tokens[2].compare("redirect-gateway", Qt::CaseInsensitive) == 0)) {
+                qCInfo(LOG_CONNECTION) << "Loopback proxy route fix not applied: the config already opts out of redirect-gateway";
+                return false;
+            }
+            if (directive.compare("redirect-gateway", Qt::CaseInsensitive) == 0) {
+                removedRedirectGateway++;
+                continue;
+            }
+        }
+        kept << line;
+    }
+
+    // pull-filter rules are matched first to last, so ours must precede any the config carries.
+    config = "pull-filter ignore redirect-gateway\r\n" + kept.join('\n');
+    config += "\r\nroute 0.0.0.0 128.0.0.0 vpn_gateway\r\n";
+    config += "route 128.0.0.0 128.0.0.0 vpn_gateway\r\n";
+
+    qCInfo(LOG_CONNECTION) << "Loopback proxy route fix applied: redirect-gateway replaced by 0.0.0.0/1 and 128.0.0.0/1 tunnel routes"
+                           << "(removed" << removedRedirectGateway << "redirect-gateway line(s) from the config)";
+    return true;
 }
 
 bool MakeOVPNFile::generate(const QString &ovpnData, const QString &ip, types::Protocol protocol, uint port,

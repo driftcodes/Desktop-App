@@ -1,4 +1,5 @@
 #include <QSignalSpy>
+#include <QTcpServer>
 #include <QtTest>
 
 #include "openvpnconnection.test.h"
@@ -540,6 +541,138 @@ void TestOpenVPNConnection::testOpenVpnCapabilities()
     QCOMPARE(conn.capabilities().connectTimeoutMs, 30 * 1000);
     QVERIFY(!conn.capabilities().supportsCachedConfig);
     QVERIFY(conn.capabilities().needsSystemDnsRestore);
+}
+
+namespace {
+
+OpenVpnSessionParams makeProxySessionParams(quint16 port)
+{
+    OpenVpnSessionParams params = makeSessionParams();
+    params.proxySettings = types::ProxySettings(PROXY_OPTION_HTTP, "127.0.0.1", port, "", "");
+    return params;
+}
+
+CurrentConnectionDescr makeCustomDescr(types::Protocol::TYPE protocol, const QString &body)
+{
+    CurrentConnectionDescr descr;
+    descr.connectionNodeType = CONNECTION_NODE_CUSTOM_CONFIG;
+    descr.protocol = protocol;
+    descr.ip = "5.6.7.8";
+    descr.openVpn.customConfig = body;
+    return descr;
+}
+
+} // namespace
+
+void TestOpenVPNConnection::testLoopbackProxyRouteFixReplacesRedirectGateway()
+{
+    QString config = "client\r\ndev tun\r\nredirect-gateway def1 bypass-dhcp\r\n  --redirect-gateway ipv6\r\n"
+                     "# redirect-gateway in a comment stays\r\n<ca>\r\nredirect-gateway-looking key data\r\n</ca>\r\n"
+                     "remote 5.6.7.8 443 tcp\r\n";
+
+    QVERIFY(MakeOVPNFile::applyLoopbackProxyRouteFix(config));
+
+    // The pull-filter comes first so it wins over any pull-filter the config carries.
+    QVERIFY(config.startsWith("pull-filter ignore redirect-gateway\r\n"));
+    QVERIFY(!config.contains("redirect-gateway def1"));
+    QVERIFY(!config.contains("--redirect-gateway ipv6"));
+    QVERIFY(config.contains("# redirect-gateway in a comment stays"));
+    QVERIFY(config.contains("redirect-gateway-looking key data"));
+    QVERIFY(config.contains("remote 5.6.7.8 443 tcp"));
+    QVERIFY(config.contains("route 0.0.0.0 128.0.0.0 vpn_gateway"));
+    QVERIFY(config.contains("route 128.0.0.0 128.0.0.0 vpn_gateway"));
+}
+
+void TestOpenVPNConnection::testLoopbackProxyRouteFixRespectsOptOut()
+{
+    const QStringList optOuts = {"route-nopull", "route-noexec", "pull-filter ignore \"redirect-gateway\"",
+                                 "PULL-FILTER IGNORE redirect-gateway"};
+    for (const QString &optOut : optOuts) {
+        const QString original = "client\r\n" + optOut + "\r\nremote 5.6.7.8 443 tcp\r\n";
+        QString config = original;
+        QVERIFY2(!MakeOVPNFile::applyLoopbackProxyRouteFix(config), qPrintable(optOut));
+        QCOMPARE(config, original);
+    }
+}
+
+void TestOpenVPNConnection::testPrepareCustomTcpWithLoopbackProxyProbesAndAppliesFix()
+{
+    QTcpServer proxy;
+    QVERIFY(proxy.listen(QHostAddress::LocalHost, 0));
+
+    OpenVPNConnection conn(nullptr, helper_, types::Protocol::OPENVPN_UDP, makeProxySessionParams(proxy.serverPort()));
+    QSignalSpy preparedSpy(&conn, &IConnection::prepared);
+    QSignalSpy failedSpy(&conn, &IConnection::prepareFailed);
+
+    conn.prepare(makeCustomDescr(types::Protocol::OPENVPN_TCP,
+                                 "dev tun\r\nredirect-gateway def1\r\nremote 5.6.7.8 443 tcp\r\n"),
+                 makeEnv());
+
+    // The probe is asynchronous: nothing is emitted until the proxy answers.
+    QCOMPARE(preparedSpy.count(), 0);
+    QVERIFY(preparedSpy.wait(5000));
+    QCOMPARE(failedSpy.count(), 0);
+    QVERIFY(conn.isProxyForwarded());
+    QVERIFY(conn.isRouteFixApplied_);
+    QVERIFY(conn.isAllowFirewallAfterConnectionRuntime());
+    QVERIFY(conn.config_.startsWith("pull-filter ignore redirect-gateway"));
+    QVERIFY(!conn.config_.contains("redirect-gateway def1"));
+    QVERIFY(conn.config_.contains("route 0.0.0.0 128.0.0.0 vpn_gateway"));
+}
+
+void TestOpenVPNConnection::testPrepareTcpWithUnreachableProxyFails()
+{
+    // Take a free port and release it, so nothing listens there.
+    quint16 port = 0;
+    {
+        QTcpServer server;
+        QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+        port = server.serverPort();
+    }
+
+    OpenVPNConnection conn(nullptr, helper_, types::Protocol::OPENVPN_TCP, makeProxySessionParams(port));
+    QSignalSpy preparedSpy(&conn, &IConnection::prepared);
+    QSignalSpy failedSpy(&conn, &IConnection::prepareFailed);
+
+    CurrentConnectionDescr descr = makeUdpDescr();
+    descr.protocol = types::Protocol::OPENVPN_TCP;
+    conn.prepare(descr, makeEnv());
+
+    QVERIFY(failedSpy.wait(5000));
+    QCOMPARE(failedSpy.first().first().value<ConnectError>(), ConnectError::kProxyUnreachable);
+    QCOMPARE(preparedSpy.count(), 0);
+}
+
+void TestOpenVPNConnection::testPrepareCustomUdpWithProxyDoesNotUseIt()
+{
+    OpenVPNConnection conn(nullptr, helper_, types::Protocol::OPENVPN_UDP, makeProxySessionParams(9));
+    QSignalSpy preparedSpy(&conn, &IConnection::prepared);
+
+    conn.prepare(makeCustomDescr(types::Protocol::OPENVPN_UDP,
+                                 "dev tun\r\nredirect-gateway def1\r\nremote 5.6.7.8 1194 udp\r\n"),
+                 makeEnv());
+
+    // No probe and no rewrite: ConnectionManager refuses non-TCP attempts under a proxy before this point.
+    QCOMPARE(preparedSpy.count(), 1);
+    QVERIFY(!conn.isProxyForwarded());
+    QVERIFY(!conn.isRouteFixApplied_);
+    QVERIFY(conn.config_.contains("redirect-gateway def1"));
+}
+
+void TestOpenVPNConnection::testPrepareEmergencyTcpIgnoresProxy()
+{
+    OpenVpnSessionParams params = makeProxySessionParams(9);
+    params.isEmergencyConnect = true;
+    OpenVPNConnection conn(nullptr, helper_, types::Protocol::OPENVPN_TCP, params);
+    QSignalSpy preparedSpy(&conn, &IConnection::prepared);
+
+    CurrentConnectionDescr descr = makeUdpDescr();
+    descr.protocol = types::Protocol::OPENVPN_TCP;
+    conn.prepare(descr, makeEnv());
+
+    QCOMPARE(preparedSpy.count(), 1);
+    QVERIFY(!conn.isProxyForwarded());
+    QVERIFY(!conn.isRouteFixApplied_);
 }
 
 QTEST_MAIN(TestOpenVPNConnection)

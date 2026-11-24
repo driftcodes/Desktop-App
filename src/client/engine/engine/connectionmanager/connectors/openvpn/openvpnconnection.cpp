@@ -1,5 +1,7 @@
 #include "openvpnconnection.h"
 
+#include <QHostAddress>
+#include <QNetworkProxy>
 #include <QRegularExpression>
 
 #include <chrono>
@@ -43,6 +45,11 @@ OpenVPNConnection::OpenVPNConnection(QObject *parent, Helper *helper, types::Pro
 
     connect(&killControllerTimer_, &QTimer::timeout, this, &OpenVPNConnection::onKillControllerTimer);
 
+    proxyProbeTimer_.setSingleShot(true);
+    connect(&proxyProbeTimer_, &QTimer::timeout, this, [this]() {
+        onProxyProbeFinished(false, "no answer within " + QString::number(kProxyProbeTimeoutMs) + " ms");
+    });
+
     stunnelManager_ = new StunnelManager(this, helper);
     connect(stunnelManager_, &StunnelManager::stunnelStarted, this, &OpenVPNConnection::onWrapperStarted);
 
@@ -60,6 +67,7 @@ OpenVPNConnection::~OpenVPNConnection()
 
 void OpenVPNConnection::prepareImpl()
 {
+    isRouteFixApplied_ = false;
     if (descr_.connectionNodeType == CONNECTION_NODE_CUSTOM_CONFIG) {
         isCustomConfig_ = true;
         // Credentials for custom configs arrive through the user-input path when OpenVPN asks for them.
@@ -70,7 +78,10 @@ void OpenVPNConnection::prepareImpl()
         if (!env_.primaryDnsServer.isEmpty()) {
             MakeOVPNFile::appendDnsOverride(config_, env_.primaryDnsServer);
         }
-        emit prepared();
+        if (isProxyForwarded() && isLoopbackProxy()) {
+            isRouteFixApplied_ = MakeOVPNFile::applyLoopbackProxyRouteFix(config_);
+        }
+        finishPrepare();
         return;
     }
 
@@ -124,6 +135,9 @@ void OpenVPNConnection::prepareImpl()
         return;
     }
     config_ = makeOVPNFile.config();
+    if (isProxyForwarded() && isLoopbackProxy()) {
+        isRouteFixApplied_ = MakeOVPNFile::applyLoopbackProxyRouteFix(config_);
+    }
 
     if (descr_.protocol == types::Protocol::STUNNEL) {
         if (!stunnelManager_->runProcess(descr_.ip, descr_.port,
@@ -140,11 +154,89 @@ void OpenVPNConnection::prepareImpl()
         return;
     }
 
-    emit prepared();
+    finishPrepare();
+}
+
+bool OpenVPNConnection::isProxyForwarded() const
+{
+    if (sessionParams_.isEmergencyConnect || descr_.protocol != types::Protocol::OPENVPN_TCP) {
+        return false;
+    }
+    const PROXY_OPTION option = sessionParams_.proxySettings.option();
+    return option == PROXY_OPTION_HTTP || option == PROXY_OPTION_SOCKS;
+}
+
+bool OpenVPNConnection::isLoopbackProxy() const
+{
+    return QHostAddress(sessionParams_.proxySettings.address()).isLoopback();
+}
+
+void OpenVPNConnection::finishPrepare()
+{
+    if (!isProxyForwarded()) {
+        emit prepared();
+        return;
+    }
+
+    if (proxyProbeSocket_) {
+        proxyProbeSocket_->disconnect(this);
+        proxyProbeSocket_->abort();
+        proxyProbeSocket_->deleteLater();
+    }
+
+    const QString address = sessionParams_.proxySettings.address();
+    const quint16 port = static_cast<quint16>(sessionParams_.proxySettings.getPort());
+    qCInfo(LOG_CONNECTION) << "Checking that the proxy at" << address << "port" << port << "accepts connections";
+
+    QTcpSocket *socket = new QTcpSocket(this);
+    // Probe the proxy itself, never through an application-wide proxy.
+    socket->setProxy(QNetworkProxy::NoProxy);
+    proxyProbeSocket_ = socket;
+    connect(socket, &QTcpSocket::connected, this, [this, socket]() {
+        if (socket == proxyProbeSocket_) {
+            onProxyProbeFinished(true, QString());
+        }
+    });
+    connect(socket, &QAbstractSocket::errorOccurred, this, [this, socket](QAbstractSocket::SocketError) {
+        if (socket == proxyProbeSocket_) {
+            onProxyProbeFinished(false, socket->errorString());
+        }
+    });
+    proxyProbeTimer_.start(kProxyProbeTimeoutMs);
+    socket->connectToHost(QHostAddress(address), port);
+}
+
+void OpenVPNConnection::onProxyProbeFinished(bool reachable, const QString &reason)
+{
+    proxyProbeTimer_.stop();
+    if (proxyProbeSocket_) {
+        // deleteLater: this may run inside one of the socket's own signals.
+        proxyProbeSocket_->disconnect(this);
+        proxyProbeSocket_->abort();
+        proxyProbeSocket_->deleteLater();
+        proxyProbeSocket_.clear();
+    }
+
+    if (reachable) {
+        qCInfo(LOG_CONNECTION) << "Proxy accepted the connection; launching OpenVPN through it";
+        emit prepared();
+    } else {
+        qCWarning(LOG_CONNECTION) << "The proxy at" << sessionParams_.proxySettings.address() << "port"
+                                  << sessionParams_.proxySettings.getPort() << "is not reachable:" << reason;
+        emit prepareFailed(ConnectError::kProxyUnreachable);
+    }
 }
 
 void OpenVPNConnection::teardown()
 {
+    proxyProbeTimer_.stop();
+    if (proxyProbeSocket_) {
+        proxyProbeSocket_->disconnect(this);
+        proxyProbeSocket_->abort();
+        proxyProbeSocket_->deleteLater();
+        proxyProbeSocket_.clear();
+    }
+
 #ifdef Q_OS_MACOS
     if (isDialed_) {
         helper_->deleteRoute(descr_.ip, 32, QString::fromStdString(env_.defaultAdapterInfo.gatewayV4().toString()));
@@ -205,7 +297,7 @@ bool OpenVPNConnection::isDisconnected() const
 
 bool OpenVPNConnection::isAllowFirewallAfterConnectionRuntime() const
 {
-    return isRedirectGatewayObserved_;
+    return isRedirectGatewayObserved_ || isRouteFixApplied_;
 }
 
 void OpenVPNConnection::continueWithUserInput(const UserInputResponse &response)
@@ -288,8 +380,8 @@ bool OpenVPNConnection::runOpenVPN()
 
     // OpenVPN will only allow use of the proxy settings if the protocol is TCP.  Only send them to the helper
     // if they can be used, to avoid it inadvertently applying them to an unsupported protocol.
-    // Custom configs and emergency sessions never forward the proxy, even on TCP.
-    if (!isCustomConfig_ && !sessionParams_.isEmergencyConnect && descr_.protocol == types::Protocol::OPENVPN_TCP) {
+    // Imported (custom) configs use the proxy too; the emergency session never does.
+    if (isProxyForwarded()) {
         if (sessionParams_.proxySettings.option() == PROXY_OPTION_HTTP) {
             httpProxy = sessionParams_.proxySettings.address();
             httpPort = sessionParams_.proxySettings.getPort();
@@ -325,14 +417,15 @@ void OpenVPNConnection::run()
     BIND_CRASH_HANDLER_FOR_THREAD();
 #ifdef Q_OS_WIN
     // NOTE: The emergency connect OpenVPN server is old-old and generates data packets not supported by the DCO driver.
-    const bool useDCODriver = !isCustomConfig_ && !sessionParams_.isEmergencyConnect && ExtraConfig::instance().useOpenVpnDCO() && !(sessionParams_.proxySettings.isProxyEnabled() && protocol_ == types::Protocol::OPENVPN_TCP);
+    // DCO cannot carry OpenVPN's proxy support, so a proxied attempt always uses the regular adapter.
+    const bool useDCODriver = !isCustomConfig_ && !sessionParams_.isEmergencyConnect && ExtraConfig::instance().useOpenVpnDCO() && !isProxyForwarded();
     const bool adapterCreated = helper_->createOpenVpnAdapter(useDCODriver);
     helper_->enableDnsLeaksProtection();
 #elif defined (Q_OS_LINUX)
     // NOTE: The emergency connect OpenVPN server is old-old and generates data packets not supported by the DCO driver.
-    // Custom configs never forward the proxy (see runOpenVPN), so they cannot hit the DCO/proxy conflict.
+    // DCO cannot carry OpenVPN's proxy support, so a proxied attempt (custom configs included) disables it.
     const bool useDCODriver = !sessionParams_.isEmergencyConnect && ExtraConfig::instance().useOpenVpnDCO() &&
-                              !(!isCustomConfig_ && sessionParams_.proxySettings.isProxyEnabled() && protocol_ == types::Protocol::OPENVPN_TCP);
+                              !isProxyForwarded();
     helper_->setOpenVpnDcoMode(useDCODriver);
 #endif
 
@@ -776,6 +869,15 @@ void OpenVPNConnection::handleRead(const boost::system::error_code &err, size_t 
             {
                 setCurrentState(STATUS_CONNECTED);
                 emit error(ConnectError::kTransientTunnelFailure);
+            }
+            else if (serverReply.contains("CONNECTED,ROUTE_ERROR", Qt::CaseInsensitive))
+            {
+                // The tunnel is up but OpenVPN could not install its routes, so traffic would not go
+                // where the user expects. Without this branch the attempt waited for the connect
+                // timeout, and a custom config (which has none) waited forever.
+                qCCritical(LOG_CONNECTION) << "OpenVPN connected but could not add its routes (CONNECTED,ROUTE_ERROR)";
+                setCurrentState(STATUS_CONNECTED);
+                emit error(ConnectError::kRouteSetupFailure);
             }
             else if (serverReply.contains("RECONNECTING", Qt::CaseInsensitive))
             {

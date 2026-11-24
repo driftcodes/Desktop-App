@@ -721,7 +721,9 @@ void ConnectionManager::startAttempt()
     // An automatic walk can be empty when every protocol was filtered out (proxy, lockdown, Always
     // On+ without a cached config); the factory cannot build a connector for it.
     if (protocol == types::Protocol::UNINITIALIZED) {
-        failWithError(ConnectError::kLocationUnavailable);
+        // With a proxy configured the walk keeps only OpenVPN TCP; say so rather than blaming the location.
+        const bool proxyFilteredWalk = lastRequest_.proxySettings.isProxyEnabled() && !lastRequest_.openVpn.isEmergencyConnect;
+        failWithError(proxyFilteredWalk ? ConnectError::kProxyRequiresTcp : ConnectError::kLocationUnavailable);
         return;
     }
 
@@ -795,8 +797,17 @@ void ConnectionManager::onHostnamesResolved()
         return;
     }
 
-    if (lastRequest_.proxySettings.isProxyEnabled() && currentConnectionDescr_.protocol != types::Protocol::OPENVPN_TCP) {
-        qCWarning(LOG_CONNECTION) << "WARNING: LAN proxy setting ignored because the connection protocol is not TCP.";
+    // Only OpenVPN TCP can be carried through the configured proxy. Anything else would dial the server
+    // directly, which is exactly what a user who configured a proxy (often because direct connections
+    // are blocked or must not be made) does not want; refuse with a clear error instead. Emergency
+    // connect is exempt: it is a last-resort path with its own fixed endpoints.
+    if (lastRequest_.proxySettings.isProxyEnabled() && !lastRequest_.openVpn.isEmergencyConnect &&
+        currentConnectionDescr_.protocol != types::Protocol::OPENVPN_TCP) {
+        qCWarning(LOG_CONNECTION) << "A proxy is configured but the connection protocol is"
+                                  << currentConnectionDescr_.protocol.toLongString()
+                                  << "- refusing to connect directly; only OpenVPN TCP can use the proxy.";
+        failWithError(ConnectError::kProxyRequiresTcp);
+        return;
     }
 
     AttemptEnvironment env;

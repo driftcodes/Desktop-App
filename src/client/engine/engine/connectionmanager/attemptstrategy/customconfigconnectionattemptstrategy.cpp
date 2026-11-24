@@ -3,12 +3,31 @@
 #include "utils/log/logger.h"
 
 CustomConfigConnectionAttemptStrategy::CustomConfigConnectionAttemptStrategy(
-    QSharedPointer<locationsmodel::BaseLocationInfo> bli) :
-        locationInfo_(qSharedPointerDynamicCast<locationsmodel::CustomConfigLocationInfo>(bli))
+    QSharedPointer<locationsmodel::BaseLocationInfo> bli, bool tcpOnly) :
+        locationInfo_(qSharedPointerDynamicCast<locationsmodel::CustomConfigLocationInfo>(bli)),
+        tcpOnly_(tcpOnly)
 {
     WS_ASSERT(!locationInfo_.isNull());
     WS_ASSERT(locationInfo_->locationId().isCustomConfigsLocation());
-    connect(locationInfo_.data(), &locationsmodel::CustomConfigLocationInfo::hostnamesResolved, this, &CustomConfigConnectionAttemptStrategy::hostnamesResolved);
+    connect(locationInfo_.data(), &locationsmodel::CustomConfigLocationInfo::hostnamesResolved, this, &CustomConfigConnectionAttemptStrategy::onLocationHostnamesResolved);
+}
+
+void CustomConfigConnectionAttemptStrategy::onLocationHostnamesResolved()
+{
+    skipToTcpNodeIfRequired();
+    emit hostnamesResolved();
+}
+
+void CustomConfigConnectionAttemptStrategy::skipToTcpNodeIfRequired()
+{
+    if (!tcpOnly_ || locationInfo_->configType() != CUSTOM_CONFIG_OPENVPN) {
+        return;
+    }
+    // When no remote is TCP the selection stays on a UDP node, and ConnectionManager refuses the
+    // attempt with kProxyRequiresTcp instead of dialing it directly.
+    if (!locationInfo_->selectNodeWithProtocol("tcp")) {
+        qCWarning(LOG_CONNECTION) << "A proxy is configured but this custom config has no TCP remote";
+    }
 }
 
 void CustomConfigConnectionAttemptStrategy::reset()
@@ -24,6 +43,7 @@ void CustomConfigConnectionAttemptStrategy::debugLocationInfoToLog() const
 void CustomConfigConnectionAttemptStrategy::putFailedConnection()
 {
     locationInfo_->selectNextNode();
+    skipToTcpNodeIfRequired();
 }
 
 bool CustomConfigConnectionAttemptStrategy::isFailed() const

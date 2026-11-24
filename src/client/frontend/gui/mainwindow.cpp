@@ -3654,6 +3654,17 @@ void MainWindow::handleDisconnectWithError(const types::ConnectState &connectSta
     } else if (connectState.connectError == ConnectError::kOSServiceUnavailable) {
         msg = tr("The Remote Access Connection Manager (RasMan) service is not running and could not be started. This prevents IKEv2 from being used on this PC."
                  " Please try another connection mode or investigate why this core Windows service is unable to start.");
+    } else if (connectState.connectError == ConnectError::kProxyUnreachable) {
+        const types::ProxySettings &proxy = backend_->getPreferences()->proxySettings();
+        msg = tr("Windscribe could not reach the proxy at %1:%2, so it did not connect. Make sure the proxy application is running,"
+                 " or turn off the proxy in Preferences > Connection > Proxy Settings.")
+                  .arg(proxy.address()).arg(proxy.getPort());
+    } else if (connectState.connectError == ConnectError::kProxyRequiresTcp) {
+        msg = tr("A proxy is configured, and only OpenVPN TCP connections can use it. Windscribe did not connect, to avoid bypassing the proxy."
+                 " Choose OpenVPN TCP (for a custom config, one with a TCP remote), or turn off the proxy in Preferences > Connection > Proxy Settings.");
+    } else if (connectState.connectError == ConnectError::kRouteSetupFailure) {
+        msg = tr("The VPN connected, but its routes could not be added, so Windscribe disconnected. If you use a proxy on this computer,"
+                 " make sure your Advanced Parameters do not add redirect-gateway or conflicting route lines.");
     } else {
         msg = tr("An unexpected error occurred establishing the VPN connection (Error %1).  If this error persists, try using a different protocol or contact support.").arg(static_cast<int>(connectState.connectError));
         if (!connectState.connectErrorDetail.isEmpty()) {

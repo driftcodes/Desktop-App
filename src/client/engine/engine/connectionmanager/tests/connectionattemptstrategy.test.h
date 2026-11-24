@@ -19,7 +19,7 @@ private slots:
     void testAutoWireGuardOverrideSelectsNodeByIp();
     void testAutoRetryReadsOverrideLive();
     void testAutoWalkTwoAttemptsPerProtocolInOrder();
-    void testAutoProxyEnabledSkipsOpenVpnUdpOnly();
+    void testAutoProxyEnabledKeepsOnlyOpenVpnTcp();
     void testAutoSkipWireguardProtocol();
     void testAutoLockdownSkipsIkev2();
     void testAutoHasProtocolChangedOnEvenAttemptsOnly();

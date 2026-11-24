@@ -16,7 +16,7 @@ IConnectionAttemptStrategy *ConnectionAttemptStrategyFactory::createStrategy(QSh
 {
     IConnectionAttemptStrategy *strategy = nullptr;
     if (bli->locationId().isCustomConfigsLocation()) {
-        strategy = new CustomConfigConnectionAttemptStrategy(bli);
+        strategy = new CustomConfigConnectionAttemptStrategy(bli, proxySettings.isProxyEnabled());
     } else if (connectionSettings.isAutomatic()) {
         // Under Always On+ we can only attempt WireGuard from a usable cached config; otherwise skip it.
         const bool skipWireguardProtocol = isFirewallAlwaysOnPlusEnabled && !hasUsableCachedWgConfig;

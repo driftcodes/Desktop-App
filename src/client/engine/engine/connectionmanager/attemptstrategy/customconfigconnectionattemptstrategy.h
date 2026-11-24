@@ -8,7 +8,9 @@ class CustomConfigConnectionAttemptStrategy : public IConnectionAttemptStrategy
 {
     Q_OBJECT
 public:
-    explicit CustomConfigConnectionAttemptStrategy(QSharedPointer<locationsmodel::BaseLocationInfo> bli);
+    // tcpOnly: a proxy is configured, so only the profile's TCP remotes may be dialed (OpenVPN can
+    // carry only TCP through a proxy). UDP remotes are skipped; a profile with none is refused later.
+    explicit CustomConfigConnectionAttemptStrategy(QSharedPointer<locationsmodel::BaseLocationInfo> bli, bool tcpOnly = false);
 
 
     void reset() override;
@@ -22,6 +24,12 @@ public:
     bool usesConnectTimeout() const override { return false; }
     bool surfacesTunnelTestFailure() const override { return true; }
 
+private slots:
+    void onLocationHostnamesResolved();
+
 private:
     QSharedPointer<locationsmodel::CustomConfigLocationInfo> locationInfo_;
+    const bool tcpOnly_;
+
+    void skipToTcpNodeIfRequired();
 };

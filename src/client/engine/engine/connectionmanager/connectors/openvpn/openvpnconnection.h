@@ -2,6 +2,8 @@
 
 #include <QThread>
 #include <QElapsedTimer>
+#include <QPointer>
+#include <QTcpSocket>
 #include <QTimer>
 
 #include <atomic>
@@ -79,6 +81,22 @@ private:
     CONNECTION_STATUS getCurrentState() const;
     bool runOpenVPN();
     ConnectError launchFailureError() const;
+
+    // Whether this attempt is dialed through the user's HTTP/SOCKS proxy: OpenVPN TCP only, never for
+    // the emergency session. Imported (custom) configs are included.
+    bool isProxyForwarded() const;
+    bool isLoopbackProxy() const;
+    // Final prepare step: when the proxy will be used, confirm it accepts a TCP connection before
+    // OpenVPN is launched, so an unavailable proxy is reported instead of hanging in reconnect.
+    void finishPrepare();
+    void onProxyProbeFinished(bool reachable, const QString &reason);
+
+    static constexpr int kProxyProbeTimeoutMs = 3000;
+    QPointer<QTcpSocket> proxyProbeSocket_;
+    QTimer proxyProbeTimer_;
+    // The loopback-proxy route fix replaced redirect-gateway with full-tunnel routes, so the default
+    // gateway is redirected even when the server's push no longer shows it.
+    bool isRouteFixApplied_ = false;
     QString takeConnectErrorDetail() override;
 
 #ifdef Q_OS_WIN

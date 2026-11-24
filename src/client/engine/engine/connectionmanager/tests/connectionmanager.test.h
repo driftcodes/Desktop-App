@@ -174,6 +174,9 @@ private slots:
     void testBlockingDisconnectFromConnectedRunsCleanup();
     void testUpdateConnectionSettingsDuringReconnectingIsDeferred();
     void testEmptyWalkFailsWithLocationUnavailable();
+    void testEmptyWalkUnderProxyFailsWithProxyRequiresTcp();
+    void testProxyWithNonTcpProtocolRefusesDirectConnection();
+    void testProxyWithEmergencyConnectIsExempt();
     void testErrorQueuedBeforeSleepIgnoredInSleeping();
     void testErrorAfterBlockingDisconnectIgnored();
     void testClassifyPrepareErrorMatrix();

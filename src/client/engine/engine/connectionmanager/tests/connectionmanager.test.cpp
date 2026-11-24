@@ -532,6 +532,12 @@ void TestConnectionManager::testClassifyConnectErrorMatrix()
     QCOMPARE(classifyConnectError(ConnectError::kDnsServiceStartFailure, true, false, false), C::Unknown);
     QCOMPARE(classifyConnectError(ConnectError::kBlockedByOsPolicy, true, false, false), C::Unknown);
     QCOMPARE(classifyConnectError(ConnectError::kLocalDnsServerNotAvailable, true, false, false), C::Unknown);
+    // Proxy refusals arrive through prepareFailed/failWithError; a route failure is fatal in every mode.
+    QCOMPARE(classifyConnectError(ConnectError::kProxyUnreachable, true, false, false), C::Unknown);
+    QCOMPARE(classifyConnectError(ConnectError::kProxyRequiresTcp, true, false, false), C::Unknown);
+    QCOMPARE(classifyConnectError(ConnectError::kRouteSetupFailure, true, false, false), C::ErrorAfterDisconnect);
+    QCOMPARE(classifyConnectError(ConnectError::kRouteSetupFailure, false, false, true), C::ErrorAfterDisconnect);
+    QCOMPARE(classifyPrepareError(ConnectError::kProxyUnreachable, true), PrepareErrorRouting::HardStop);
 }
 
 void TestConnectionManager::testRecordFailureAndAdvance()
@@ -2964,6 +2970,58 @@ void TestConnectionManager::testEmptyWalkFailsWithLocationUnavailable()
     QCOMPARE(qvariant_cast<ConnectError>(errorSpy.at(0).at(0)), ConnectError::kLocationUnavailable);
     QCOMPARE(cm_->state_, ConnectionManager::State::kDisconnected);
     QCOMPARE(connectionFactory_->createdCount(), 0);
+}
+
+void TestConnectionManager::testEmptyWalkUnderProxyFailsWithProxyRequiresTcp()
+{
+    // Under a proxy the automatic walk keeps only OpenVPN TCP; when nothing is left the error says so.
+    attemptStrategyFactory_->setCurrentConnectionSettings(CurrentConnectionDescr());
+
+    QSignalSpy errorSpy(cm_, &ConnectionManager::errorDuringConnection);
+    ConnectRequest req;
+    req.bli = QSharedPointer<FakeLocationInfo>::create();
+    req.proxySettings = types::ProxySettings(PROXY_OPTION_HTTP, "127.0.0.1", 2080, "", "");
+    cm_->clickConnect(req);
+
+    QCOMPARE(errorSpy.count(), 1);
+    QCOMPARE(qvariant_cast<ConnectError>(errorSpy.at(0).at(0)), ConnectError::kProxyRequiresTcp);
+    QCOMPARE(connectionFactory_->createdCount(), 0);
+}
+
+void TestConnectionManager::testProxyWithNonTcpProtocolRefusesDirectConnection()
+{
+    // A manual WireGuard choice (or a UDP-only custom config) cannot go through the proxy; it must
+    // not silently dial the server directly.
+    attemptStrategyFactory_->setCurrentConnectionSettings(makeWireGuardDescr());
+
+    QSignalSpy errorSpy(cm_, &ConnectionManager::errorDuringConnection);
+    ConnectRequest req;
+    req.bli = QSharedPointer<FakeLocationInfo>::create();
+    req.proxySettings = types::ProxySettings(PROXY_OPTION_HTTP, "127.0.0.1", 2080, "", "");
+    cm_->clickConnect(req);
+
+    QTRY_COMPARE(errorSpy.count(), 1);
+    QCOMPARE(qvariant_cast<ConnectError>(errorSpy.at(0).at(0)), ConnectError::kProxyRequiresTcp);
+    QCOMPARE(cm_->state_, ConnectionManager::State::kDisconnected);
+    FakeConnection *conn = connectionFactory_->lastCreated();
+    QVERIFY(conn == nullptr || conn->startConnectCount() == 0);
+}
+
+void TestConnectionManager::testProxyWithEmergencyConnectIsExempt()
+{
+    attemptStrategyFactory_->setCurrentConnectionSettings(makeWireGuardDescr());
+
+    QSignalSpy errorSpy(cm_, &ConnectionManager::errorDuringConnection);
+    ConnectRequest req;
+    req.bli = QSharedPointer<FakeLocationInfo>::create();
+    req.proxySettings = types::ProxySettings(PROXY_OPTION_HTTP, "127.0.0.1", 2080, "", "");
+    req.openVpn.isEmergencyConnect = true;
+    cm_->clickConnect(req);
+
+    FakeConnection *conn = connectionFactory_->lastCreated();
+    QVERIFY(conn != nullptr);
+    QTRY_VERIFY(conn->startConnectCount() > 0);
+    QCOMPARE(errorSpy.count(), 0);
 }
 
 void TestConnectionManager::testErrorQueuedBeforeSleepIgnoredInSleeping()

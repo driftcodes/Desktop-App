@@ -17,4 +17,6 @@ private slots:
     void testWireGuardIpLiteralResolve();
     void testWireGuardV6LiteralEndpointSkipped();
     void testHostnameMultiIpRotation();
+    void testSelectNodeWithProtocolSkipsUdpRemotes();
+    void testSelectNodeWithProtocolNoMatchKeepsSelection();
 };

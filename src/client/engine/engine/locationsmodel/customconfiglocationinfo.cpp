@@ -1,4 +1,6 @@
 #include "customconfiglocationinfo.h"
+
+#include <algorithm>
 #include "engine/customconfigs/ovpncustomconfig.h"
 #include "engine/customconfigs/wireguardcustomconfig.h"
 #include "utils/log/categories.h"
@@ -316,6 +318,33 @@ void CustomConfigLocationInfo::selectNextNode()
             selected_ = 0;
         }
     }
+}
+
+bool CustomConfigLocationInfo::selectNodeWithProtocol(const QString &protocol)
+{
+    if (!bAllResolved_ || remotes_.isEmpty()) {
+        return false;
+    }
+
+    // selectNextNode() cycles through every IP of every remote and wraps to the start, so this many
+    // steps visit each node once. A hostname that resolved to nothing still takes one step.
+    int nodeCount = 0;
+    for (const auto &remote : remotes_) {
+        nodeCount += remote.isHostname ? std::max(1, static_cast<int>(remote.ipsForHostname_.count())) : 1;
+    }
+
+    const int startSelected = selected_;
+    const int startSelectedHostname = selectedHostname_;
+    for (int i = 0; i < nodeCount; ++i) {
+        if (isExistSelectedNode() && getSelectedProtocol().compare(protocol, Qt::CaseInsensitive) == 0) {
+            return true;
+        }
+        selectNextNode();
+    }
+
+    selected_ = startSelected;
+    selectedHostname_ = startSelectedHostname;
+    return false;
 }
 
 QString CustomConfigLocationInfo::getLogString() const

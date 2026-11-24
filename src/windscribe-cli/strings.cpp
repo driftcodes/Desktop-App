@@ -129,6 +129,12 @@ QString connectStateString(types::ConnectState state, LocationID location, TUNNE
                            "Please disable Lockdown Mode in System Settings or change your connection settings");
         case ConnectError::kOSServiceUnavailable:
             return QString("Error: The Remote Access Connection Manager (RasMan) service is not running and could not be started");
+        case ConnectError::kProxyUnreachable:
+            return QString("Error: The configured proxy is not reachable. Make sure the proxy application is running, or turn off the proxy");
+        case ConnectError::kProxyRequiresTcp:
+            return QString("Error: A proxy is configured and only OpenVPN TCP can use it. Choose OpenVPN TCP (or a custom config with a TCP remote), or turn off the proxy");
+        case ConnectError::kRouteSetupFailure:
+            return QString("Error: The VPN connected but its routes could not be added");
         default:
             if (!state.connectErrorDetail.isEmpty()) {
                 return QString("Error: %1").arg(static_cast<int>(state.connectError)) + QString(". ") + state.connectErrorDetail;

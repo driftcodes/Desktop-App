@@ -15,7 +15,9 @@ AutoConnectionAttemptStrategy::AutoConnectionAttemptStrategy(QSharedPointer<loca
     for (int portMapInd = 0; portMapInd < portMap_.const_items().count(); ++portMapInd) {
         const auto protocol = portMap_.const_items()[portMapInd].protocol;
 
-        if (isProxyEnabled && protocol == types::Protocol::OPENVPN_UDP) {
+        // Only OpenVPN TCP can be carried through the configured proxy; every other protocol would
+        // connect directly and bypass it.
+        if (isProxyEnabled && protocol != types::Protocol::OPENVPN_TCP) {
             continue;
         }
 

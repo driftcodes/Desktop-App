@@ -220,21 +220,27 @@ void TestConnectionAttemptStrategy::testAutoWalkTwoAttemptsPerProtocolInOrder()
     QVERIFY(strategy.isFailed());
 }
 
-void TestConnectionAttemptStrategy::testAutoProxyEnabledSkipsOpenVpnUdpOnly()
+void TestConnectionAttemptStrategy::testAutoProxyEnabledKeepsOnlyOpenVpnTcp()
 {
     auto li = makeLocationInfo();
-    auto portMap = makePortMap({types::Protocol::OPENVPN_UDP, types::Protocol::STUNNEL, types::Protocol::WIREGUARD});
+    auto portMap = makePortMap({types::Protocol::OPENVPN_UDP, types::Protocol::OPENVPN_TCP, types::Protocol::STUNNEL,
+                                types::Protocol::WIREGUARD});
 
+    // Only OpenVPN TCP can be carried through the proxy; every other protocol would bypass it.
     AutoConnectionAttemptStrategy strategy(li, portMap, true, false, false, "");
 
-    const QVector<types::Protocol> expected = {
-        types::Protocol::STUNNEL, types::Protocol::STUNNEL, types::Protocol::WIREGUARD, types::Protocol::WIREGUARD};
+    const QVector<types::Protocol> expected = {types::Protocol::OPENVPN_TCP, types::Protocol::OPENVPN_TCP};
     for (const auto &protocol : expected) {
         QVERIFY(!strategy.isFailed());
         QCOMPARE(strategy.getCurrentConnectionSettings().protocol, protocol);
         strategy.putFailedConnection();
     }
     QVERIFY(strategy.isFailed());
+
+    // A portmap without OpenVPN TCP leaves an empty walk under a proxy.
+    AutoConnectionAttemptStrategy noTcp(li, makePortMap({types::Protocol::OPENVPN_UDP, types::Protocol::WIREGUARD}),
+                                        true, false, false, "");
+    QCOMPARE(noTcp.getCurrentConnectionSettings().protocol, types::Protocol(types::Protocol::UNINITIALIZED));
 }
 
 void TestConnectionAttemptStrategy::testAutoSkipWireguardProtocol()
