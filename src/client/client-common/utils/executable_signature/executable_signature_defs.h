@@ -1,8 +1,11 @@
 #pragma once
 
 // This should match the 'Name of signer' that appears in the Digital Signatures page of the
-// signed executable's file properties dialog.
+// signed executable's file properties dialog. A build signed with a .pfx (cmake/signing.cmake,
+// WS_SIGNING_CERT_SUBJECT) defines it on the compiler command line instead.
+#ifndef WINDOWS_CERT_SUBJECT_NAME
 #define WINDOWS_CERT_SUBJECT_NAME L"Windscribe Limited"
+#endif
 
 // The Apple Developer Team ID (the subject.OU of the Developer ID Application certificate).
 // Runtime code-signing requirement strings pin this rather than the CN (which embeds the organization

@@ -20,17 +20,48 @@ if(WIN32)
 
     set(WINDOWS_SIGN_PARAMS "/fd SHA256 /td SHA256 /tr ${SIGNING_TIMESTAMP} /f ${SIGNING_CERT} /csp \"eToken Base Cryptographic Provider\" /kc \"[{{%WINDOWS_SIGNING_TOKEN_PASSWORD%}}]=%CONTAINER_NAME%\" /n \"${WINDOWS_CERT_SUBJECT_NAME}\"")
 
+    # Alternative for self-built (forked) releases: sign with a .pfx file instead of the hardware token.
+    #   WS_SIGNING_PFX           path to the .pfx (certificate + private key)
+    #   WS_SIGNING_PFX_PASSWORD  its password (read by cmd at sign time, never stored in the cache)
+    #   WS_SIGNING_CERT_SUBJECT  the certificate's subject CN; the app, helper and updater then accept
+    #                            binaries signed by this certificate instead of Windscribe Limited.
+    # The certificate's root must be trusted on the machine the app is installed on (WinVerifyTrust).
+    set(WS_SIGNING_WITH_PFX OFF)
+    if(DEFINED ENV{WS_SIGNING_PFX})
+        set(WS_SIGNING_WITH_PFX ON)
+        file(TO_NATIVE_PATH "$ENV{WS_SIGNING_PFX}" _ws_signing_pfx)
+        set(WINDOWS_SIGN_PARAMS "/fd SHA256 /td SHA256 /tr ${SIGNING_TIMESTAMP} /f \"${_ws_signing_pfx}\" /p %WS_SIGNING_PFX_PASSWORD%")
+        if(NOT DEFINED ENV{WS_SIGNING_CERT_SUBJECT} OR "$ENV{WS_SIGNING_CERT_SUBJECT}" STREQUAL "")
+            message(FATAL_ERROR "WS_SIGNING_PFX is set but WS_SIGNING_CERT_SUBJECT is not. Set it to the certificate's subject CN.")
+        endif()
+        set(WINDOWS_CERT_SUBJECT_NAME "$ENV{WS_SIGNING_CERT_SUBJECT}")
+        if(NOT WINDOWS_CERT_SUBJECT_NAME MATCHES "^[A-Za-z0-9 ._-]+$")
+            message(FATAL_ERROR "WS_SIGNING_CERT_SUBJECT may only contain letters, digits, spaces, '.', '_' and '-'.")
+        endif()
+        add_compile_definitions("WINDOWS_CERT_SUBJECT_NAME=L\"${WINDOWS_CERT_SUBJECT_NAME}\"")
+        message(STATUS "Windows signing: .pfx, signer \"${WINDOWS_CERT_SUBJECT_NAME}\"")
+    endif()
+
     if(SIGN_APP OR SIGN_INSTALLER OR SIGN_BOOTSTRAP)
         if(NOT SIGNTOOL)
             message(FATAL_ERROR "signtool not found in the Windows SDK. Cannot sign.")
         endif()
 
-        if(NOT EXISTS "${SIGNING_CERT}")
-            message(FATAL_ERROR "Signing certificate not found at ${SIGNING_CERT}. Cannot sign.")
-        endif()
+        if(WS_SIGNING_WITH_PFX)
+            if(NOT EXISTS "$ENV{WS_SIGNING_PFX}")
+                message(FATAL_ERROR "Signing certificate not found at $ENV{WS_SIGNING_PFX}. Cannot sign.")
+            endif()
+            if(NOT DEFINED ENV{WS_SIGNING_PFX_PASSWORD})
+                message(FATAL_ERROR "WS_SIGNING_PFX_PASSWORD environment variable is not set. Cannot sign.")
+            endif()
+        else()
+            if(NOT EXISTS "${SIGNING_CERT}")
+                message(FATAL_ERROR "Signing certificate not found at ${SIGNING_CERT}. Cannot sign.")
+            endif()
 
-        if(NOT DEFINED ENV{WINDOWS_SIGNING_TOKEN_PASSWORD})
-            message(FATAL_ERROR "WINDOWS_SIGNING_TOKEN_PASSWORD environment variable is not set. Cannot sign.")
+            if(NOT DEFINED ENV{WINDOWS_SIGNING_TOKEN_PASSWORD})
+                message(FATAL_ERROR "WINDOWS_SIGNING_TOKEN_PASSWORD environment variable is not set. Cannot sign.")
+            endif()
         endif()
     endif()
 
