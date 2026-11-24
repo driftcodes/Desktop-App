@@ -620,7 +620,14 @@ void TestOpenVPNConnection::testFirewallAfterConnectionFollowsConfigRouting()
     const QString workaround = "pull-filter ignore redirect-gateway\nroute 0.0.0.0 128.0.0.0 vpn_gateway\n"
                                "route 128.0.0.0 128.0.0.0 vpn_gateway\n";
     QVERIFY(analyzeOvpnRouting(workaround).sendsAllIpv4ThroughTunnel(pushDef1));
-    QVERIFY(analyzeOvpnRouting(workaround).mayRedirectAllIpv4());
+    QVERIFY(analyzeOvpnRouting(workaround).sendsAllIpv4ThroughTunnel(noPush));
+    // "default" as the gateway means the VPN gateway too.
+    QVERIFY(analyzeOvpnRouting("route 0.0.0.0 128.0.0.0 default\nroute 128.0.0.0 128.0.0.0 default\n").sendsAllIpv4ThroughTunnel(noPush));
+    // The profile ignores pushed redirect-gateway, but the server pushes both halves as routes, which
+    // the filter lets through: a full tunnel.
+    QVERIFY(analyzeOvpnRouting("pull-filter ignore redirect-gateway\n")
+                .sendsAllIpv4ThroughTunnel({"redirect-gateway def1", "route 0.0.0.0 128.0.0.0 vpn_gateway",
+                                            "route 128.0.0.0 128.0.0.0 vpn_gateway"}));
     // Only one half, or the halves via the physical gateway, is not a full tunnel.
     QVERIFY(!analyzeOvpnRouting("route-nopull\nroute 0.0.0.0 128.0.0.0\n").sendsAllIpv4ThroughTunnel(pushDef1));
     QVERIFY(!analyzeOvpnRouting("route-nopull\nroute 0.0.0.0 128.0.0.0 net_gateway\nroute 128.0.0.0 128.0.0.0 net_gateway\n")
@@ -642,16 +649,17 @@ void TestOpenVPNConnection::testFirewallAfterConnectionFollowsConfigRouting()
                 .sendsAllIpv4ThroughTunnel(pushDef1));
     QVERIFY(!analyzeOvpnRouting("pull-filter ignore redirect-gateway\npull-filter accept redirect-gateway\n")
                  .sendsAllIpv4ThroughTunnel(pushDef1));
-    // A filter on "redirect-gateway def1" leaves a plain "redirect-gateway" push possible.
-    QVERIFY(analyzeOvpnRouting("pull-filter ignore \"redirect-gateway def1\"\n").mayRedirectAllIpv4());
+    // A filter on "redirect-gateway def1" leaves a plain "redirect-gateway" push in place.
+    QVERIFY(analyzeOvpnRouting("pull-filter ignore \"redirect-gateway def1\"\n").sendsAllIpv4ThroughTunnel({"redirect-gateway"}));
 
     // Split-tunnel profiles that drop every pushed redirect.
-    QVERIFY(!analyzeOvpnRouting("pull-filter ignore \"redirect-gateway\"\nroute 10.0.0.0 255.0.0.0\n").mayRedirectAllIpv4());
-    QVERIFY(!analyzeOvpnRouting("route-nopull\n").mayRedirectAllIpv4());
-    // route-noexec installs nothing at all.
-    QVERIFY(!analyzeOvpnRouting("route-noexec\nredirect-gateway def1\n").mayRedirectAllIpv4());
-    // The helper's command-line "redirect-private local" is not a redirect either.
+    QVERIFY(!analyzeOvpnRouting("pull-filter ignore \"redirect-gateway\"\nroute 10.0.0.0 255.0.0.0\n").sendsAllIpv4ThroughTunnel(pushDef1));
+    QVERIFY(!analyzeOvpnRouting("route-nopull\n").sendsAllIpv4ThroughTunnel(pushDef1));
+    // The helper strips route-noexec from the file, so it does not stop the profile's own redirect.
+    QVERIFY(analyzeOvpnRouting("route-noexec\nredirect-gateway def1\n").sendsAllIpv4ThroughTunnel(noPush));
+    // redirect-private in the file is stripped too; pushed, it enables no redirection.
     QVERIFY(!analyzeOvpnRouting("redirect-private local\n").sendsAllIpv4ThroughTunnel(noPush));
+    QVERIFY(!analyzeOvpnRouting("client\n").sendsAllIpv4ThroughTunnel({"redirect-private local"}));
 
     // Tokenizer: quotes group, escapes, comments.
     QCOMPARE(customconfigs::tokenizeOvpnLine("pull-filter ignore \"redirect-gateway ipv6\" # note"),

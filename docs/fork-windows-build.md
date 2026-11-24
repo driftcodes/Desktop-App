@@ -55,7 +55,10 @@ The app now decides this the way OpenVPN does, from the profile and everything t
 profile's own `redirect-gateway`, its own `0.0.0.0/1` + `128.0.0.0/1` routes, or a pushed
 `redirect-gateway` (with or without `def1`) or pushed `/1` routes that the profile does not drop with
 `route-nopull` or a matching `pull-filter` (a case-sensitive prefix match, quotes included). A
-`redirect-gateway` carrying `!ipv4`, pushed or not, means IPv4 is not redirected. Before,
+`redirect-gateway` carrying `!ipv4`, pushed or not, means IPv4 is not redirected. Routes count when they go through
+the tunnel (`vpn_gateway`, `default`, or no gateway). Only lines that actually reach OpenVPN count: the
+helper strips `route-noexec` and `redirect-private` from imported files, so they are ignored here too.
+The decision is made once connected, from the profile and the server's push together. Before,
 an imported profile with `pull-filter ignore redirect-gateway` (even with its own full routes), or one
 whose `redirect-gateway` was in the file rather than pushed by the server, made Automatic / Before
 Connection switch the firewall off once connected. A profile that really only routes some networks

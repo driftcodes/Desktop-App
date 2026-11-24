@@ -17,13 +17,14 @@ QString directiveName(const QStringList &tokens)
     return name;
 }
 
-// A "route" that sends traffic into the tunnel: no gateway given, or vpn_gateway.
+// A "route" that sends traffic into the tunnel: no gateway given, "default" (which OpenVPN treats as
+// not given, i.e. the VPN gateway), or vpn_gateway.
 bool isTunnelRoute(const QStringList &tokens, const QString &network, const QString &netmask)
 {
     if (tokens.size() < 3 || tokens[1] != network || tokens[2] != netmask) {
         return false;
     }
-    return tokens.size() == 3 || tokens[3] == "vpn_gateway";
+    return tokens.size() == 3 || tokens[3] == "vpn_gateway" || tokens[3] == "default";
 }
 
 // Applies one redirect-gateway / redirect-private / route option to the running IPv4 state, the way
@@ -114,9 +115,6 @@ bool OvpnRoutingPolicy::isPushedOptionAccepted(const QString &option) const
 
 bool OvpnRoutingPolicy::sendsAllIpv4ThroughTunnel(const QStringList &pushedOptions) const
 {
-    if (routesNotExecuted) {
-        return false;
-    }
     bool redirectIpv4 = redirectsIpv4Locally;
     bool lowerHalf = hasLowerHalfRoute;
     bool upperHalf = hasUpperHalfRoute;
@@ -129,28 +127,6 @@ bool OvpnRoutingPolicy::sendsAllIpv4ThroughTunnel(const QStringList &pushedOptio
         applyRoutingOption(tokens, redirectIpv4, lowerHalf, upperHalf);
     }
     return redirectIpv4 || (lowerHalf && upperHalf);
-}
-
-bool OvpnRoutingPolicy::mayRedirectAllIpv4() const
-{
-    // The usual ways a server asks for a full IPv4 tunnel.
-    static const QStringList kTypicalPushes = {
-        "redirect-gateway def1",
-        "redirect-gateway def1 bypass-dhcp",
-        "redirect-gateway def1 bypass-dhcp bypass-dns",
-        "redirect-gateway def1 block-local",
-        "redirect-gateway autolocal def1",
-        "redirect-gateway",
-    };
-    if (sendsAllIpv4ThroughTunnel(QStringList())) {
-        return true;
-    }
-    for (const QString &push : kTypicalPushes) {
-        if (sendsAllIpv4ThroughTunnel(QStringList() << push)) {
-            return true;
-        }
-    }
-    return false;
 }
 
 OvpnRoutingPolicy analyzeOvpnRouting(const QString &config)
@@ -178,16 +154,25 @@ OvpnRoutingPolicy analyzeOvpnRouting(const QString &config)
         if (name.isEmpty()) {
             continue;
         }
-        if (isRouteOption(name)) {
+        // Only directives that reach the daemon count. The helper strips the ones not on its allowlist,
+        // among them route-noexec and redirect-private (the patched daemon would reject them anyway).
+        if (name == "redirect-gateway" || name == "route") {
             applyRoutingOption(tokens, policy.redirectsIpv4Locally, policy.hasLowerHalfRoute, policy.hasUpperHalfRoute);
         } else if (name == "route-nopull") {
             policy.routeNopull = true;
-        } else if (name == "route-noexec") {
-            policy.routesNotExecuted = true;
         } else if (name == "pull-filter" && tokens.size() >= 3) {
             policy.pullFilters.append(OvpnPullFilter{tokens[1], tokens[2]});
         }
     }
+
+#ifdef Q_OS_WIN
+    // For a config whose remote is the local wrapper (stunnel/wstunnel), the Windows helper adds
+    // "--route 0.0.0.0 128.0.0.0 vpn_gateway --route 128.0.0.0 128.0.0.0 vpn_gateway" on the command
+    // line (helper/windows/openvpn/openvpncontroller.cpp), using the same text test.
+    if (config.contains("remote 127.0.0.1")) {
+        policy.hasLowerHalfRoute = policy.hasUpperHalfRoute = true;
+    }
+#endif
     return policy;
 }
 

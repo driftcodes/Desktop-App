@@ -14,21 +14,20 @@ struct OvpnPullFilter
     QString text;
 };
 
-// What an OpenVPN config says about IPv4 default-gateway redirection, read from its text, plus the
-// rules OpenVPN uses to combine it with what the server pushes (options.c, OpenVPN 2.7):
+// What an OpenVPN config says about IPv4 default-gateway redirection, as the daemon receives it (after
+// the helper's directive filter and with the routes the helper adds), plus the rules OpenVPN uses to
+// combine it with what the server pushes (options.c, OpenVPN 2.7):
 // redirect-gateway / redirect-private flags accumulate across the config and the push, and "!ipv4"
 // in any of them switches IPv4 redirection off again.
 struct OvpnRoutingPolicy
 {
-    // IPv4 redirection after the config's own redirect-gateway / redirect-private lines, in order.
+    // IPv4 redirection after the config's own redirect-gateway lines, in order.
     bool redirectsIpv4Locally = false;
     // The config routes 0.0.0.0/1 and 128.0.0.0/1 (or 0.0.0.0/0) into the tunnel itself.
     bool hasLowerHalfRoute = false;
     bool hasUpperHalfRoute = false;
     // route-nopull: pushed routes and redirect-gateway are dropped.
     bool routeNopull = false;
-    // route-noexec: OpenVPN installs no routes at all.
-    bool routesNotExecuted = false;
     QVector<OvpnPullFilter> pullFilters;
 
     // Whether OpenVPN would apply this pushed option line (pull-filter and route-nopull).
@@ -36,10 +35,6 @@ struct OvpnRoutingPolicy
 
     // Whether the tunnel carries all IPv4 traffic, given every option line the server pushed, in order.
     bool sendsAllIpv4ThroughTunnel(const QStringList &pushedOptions) const;
-
-    // Before connecting, when the push is not known: false only if no ordinary redirect-gateway push
-    // could make the tunnel carry all IPv4 traffic.
-    bool mayRedirectAllIpv4() const;
 };
 
 OvpnRoutingPolicy analyzeOvpnRouting(const QString &config);

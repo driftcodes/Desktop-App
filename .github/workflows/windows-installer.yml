@@ -194,9 +194,10 @@ jobs:
           $dir = Join-Path $env:RUNNER_TEMP 'ovpn-smoke'
           New-Item -ItemType Directory -Force -Path $dir | Out-Null
           $config = Join-Path $dir 'config.ovpn'
+          # The file as the helper writes it: only lines on its allowlist. dev, management, verb and
+          # the proxy are helper-owned: they go on the command line and are fatal in the file.
           @(
             'client'
-            'dev tun'
             'proto tcp-client'
             'nobind'
             'persist-key'
