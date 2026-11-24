@@ -280,4 +280,17 @@ void TestCustomConfigLocationInfo::testResolveOnlyProtocolKeepsMatchingRemotes()
     QVERIFY(!udpOnly->hasRemoteWithProtocol("tcp"));
 }
 
+void TestCustomConfigLocationInfo::testOvpnConfigDoesNotVetoFirewall()
+{
+    // The engine requires this import-time flag and the connection's runtime answer; for OpenVPN the
+    // runtime answer alone decides, so the flag must not veto (e.g. a 10.0.0.0/8 local route).
+    auto info = makeOvpnCustomConfigLocationInfo(
+        "dev tun\nauth-user-pass\nredirect-gateway def1\nroute 10.0.0.0 255.0.0.0 net_gateway\nremote 1.2.3.4 443\n");
+    QVERIFY(info);
+    QVERIFY(info->isAllowFirewallAfterConnection());
+    auto ignoresPush = makeOvpnCustomConfigLocationInfo("dev tun\nauth-user-pass\npull-filter ignore redirect-gateway\nremote 1.2.3.4 443\n");
+    QVERIFY(ignoresPush);
+    QVERIFY(ignoresPush->isAllowFirewallAfterConnection());
+}
+
 QTEST_MAIN(TestCustomConfigLocationInfo)

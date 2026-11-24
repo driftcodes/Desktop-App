@@ -75,7 +75,9 @@ void forEachDirective(const QString &config, bool includeConnectionBlocks, Visit
 // Address ranges the Windscribe firewall lets through off the tunnel for a custom config, the only kind
 // of connection this classification is used for: helper/windows/firewallfilter.cpp permits the private
 // ranges, link-local and multicast whenever bIsCustomConfig is set, whatever the Allow LAN setting.
-// 10.255.255.0/24 is the exception (see firewallNeverExempt()).
+// It blocks 10.255.255.0/24 (Windscribe's in-tunnel DNS) off the tunnel in every mode; a profile's
+// direct route over that range must not count as a reason to turn the whole firewall off, so it stays
+// inside the 10.0.0.0/8 exemption here and the firewall keeps blocking it.
 const QVector<std::pair<quint32, quint32>> &firewallExemptRanges()
 {
     static const QVector<std::pair<quint32, quint32>> ranges = {
@@ -86,13 +88,6 @@ const QVector<std::pair<quint32, quint32>> &firewallExemptRanges()
         {0xE0000000u, 0xEFFFFFFFu},  // 224.0.0.0/4
     };
     return ranges;
-}
-
-// The Windscribe in-tunnel DNS range: the firewall blocks it off the tunnel in every mode.
-const std::pair<quint32, quint32> &firewallNeverExempt()
-{
-    static const std::pair<quint32, quint32> range = {0x0AFFFF00u, 0x0AFFFFFFu};  // 10.255.255.0/24
-    return range;
 }
 
 OvpnRoute routeFromTokens(const QStringList &tokens)
@@ -335,7 +330,6 @@ bool OvpnRoutingPolicy::sendsAllIpv4ThroughTunnel(const QStringList &pushedOptio
     for (const auto &range : std::as_const(exempt)) {
         bounds << range.first << range.second + 1;
     }
-    bounds << firewallNeverExempt().first << static_cast<quint64>(firewallNeverExempt().second) + 1;
     std::sort(bounds.begin(), bounds.end());
     bounds.erase(std::unique(bounds.begin(), bounds.end()), bounds.end());
 
@@ -356,8 +350,7 @@ bool OvpnRoutingPolicy::sendsAllIpv4ThroughTunnel(const QStringList &pushedOptio
         if (bestPrefix >= 0 && bestIsTunnel) {
             continue;
         }
-        const bool neverExempt = firewallNeverExempt().first <= start && start <= firewallNeverExempt().second;
-        const bool isExempt = !neverExempt && std::any_of(exempt.begin(), exempt.end(), [start](const std::pair<quint64, quint64> &range) {
+        const bool isExempt = std::any_of(exempt.begin(), exempt.end(), [start](const std::pair<quint64, quint64> &range) {
             return range.first <= start && start <= range.second;
         });
         if (!isExempt) {

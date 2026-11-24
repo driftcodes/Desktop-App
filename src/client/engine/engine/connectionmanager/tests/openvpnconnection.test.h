@@ -46,6 +46,7 @@ private slots:
     void testOpenVpnCapabilities();
     void testRunOpenVpnCustomConfigDetailEmitsCustomConfigInvalid();
     void testRunOpenVpnEmptyDetailEmitsLaunchFailure();
+    void testFirewallStaysOnWithLocalPrivateRoute();
     void testLoopbackProxyRouteFixKeepsRoutingPolicy();
     void testLoopbackProxyRouteFixDropsAutolocal();
     void testFirewallAfterConnectionFollowsConfigRouting();

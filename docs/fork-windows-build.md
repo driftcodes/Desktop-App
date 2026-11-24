@@ -62,9 +62,9 @@ address on the tunnel's subnet), and together they must cover all IPv4 addresses
 profile that sends, say, `203.0.113.0/24` through `net_gateway` is not a full tunnel, so Automatic mode
 turns the firewall off for it rather than blocking that traffic. Direct routes to private ranges
 (`10/8`, `172.16/12`, `192.168/16`, `169.254/16`) and multicast don't count: for an imported profile
-the firewall always allows those off the tunnel, whatever the Allow LAN setting. The one exception is
-`10.255.255.0/24` (Windscribe's in-tunnel DNS), which the firewall blocks off the tunnel in every mode,
-so a direct route there does count. A direct route to the VPN server itself doesn't count either: the
+the firewall always allows those off the tunnel, whatever the Allow LAN setting. That includes a route over
+`10.255.255.0/24` (Windscribe's in-tunnel DNS, e.g. a local `10.0.0.0/8` route): the firewall keeps
+blocking that range off the tunnel on its own, so it is no reason to turn the whole firewall off. A direct route to the VPN server itself doesn't count either: the
 firewall lets OpenVPN and Windows system services reach that address (other programs still can't).
 On Windows, OpenVPN adds `def1` to every `redirect-gateway` (Windscribe runs it in service mode), so
 `redirect-gateway` and `redirect-gateway def1` are treated the same. When a direct route has exactly the

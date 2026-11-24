@@ -79,6 +79,7 @@ void OpenVPNConnection::prepareImpl()
             MakeOVPNFile::appendDnsOverride(config_, env_.primaryDnsServer);
         }
         routingPolicy_ = customconfigs::analyzeOvpnRouting(config_);
+        isFullIpv4Tunnel_ = routingPolicy_.sendsAllIpv4ThroughTunnel(QStringList());
         if (isProxyForwarded() && isLoopbackProxy()) {
             MakeOVPNFile::removeAutolocalForLoopbackProxy(config_);
         }
@@ -137,6 +138,7 @@ void OpenVPNConnection::prepareImpl()
     }
     config_ = makeOVPNFile.config();
     routingPolicy_ = customconfigs::analyzeOvpnRouting(config_);
+    isFullIpv4Tunnel_ = routingPolicy_.sendsAllIpv4ThroughTunnel(QStringList());
     if (isProxyForwarded() && isLoopbackProxy()) {
         MakeOVPNFile::removeAutolocalForLoopbackProxy(config_);
     }

@@ -21,4 +21,5 @@ private slots:
     void testSelectNodeWithProtocolNoMatchKeepsSelection();
     void testSharedHostnameResolvesEveryRemote();
     void testResolveOnlyProtocolKeepsMatchingRemotes();
+    void testOvpnConfigDoesNotVetoFirewall();
 };

@@ -573,6 +573,26 @@ CurrentConnectionDescr makeCustomDescr(types::Protocol::TYPE protocol, const QSt
 
 } // namespace
 
+void TestOpenVPNConnection::testFirewallStaysOnWithLocalPrivateRoute()
+{
+    // The value the engine reads after connecting (ConnectionManager forwards it for custom configs):
+    // a full-tunnel profile that routes 10.0.0.0/8 locally keeps the automatic firewall.
+    OpenVPNConnection conn(nullptr, helper_, types::Protocol::OPENVPN_UDP, makeSessionParams());
+    conn.prepare(makeCustomDescr(types::Protocol::OPENVPN_UDP,
+                                 "dev tun\r\nredirect-gateway def1\r\nroute 10.0.0.0 255.0.0.0 net_gateway\r\n"
+                                 "remote 5.6.7.8 1194 udp\r\n"),
+                 makeEnv());
+    QVERIFY(conn.isAllowFirewallAfterConnectionRuntime());
+
+    // A public range routed locally is traffic the firewall would block, so it is not a full tunnel.
+    OpenVPNConnection publicHole(nullptr, helper_, types::Protocol::OPENVPN_UDP, makeSessionParams());
+    publicHole.prepare(makeCustomDescr(types::Protocol::OPENVPN_UDP,
+                                       "dev tun\r\nredirect-gateway def1\r\nroute 203.0.113.0 255.255.255.0 net_gateway\r\n"
+                                       "remote 5.6.7.8 1194 udp\r\n"),
+                       makeEnv());
+    QVERIFY(!publicHole.isAllowFirewallAfterConnectionRuntime());
+}
+
 void TestOpenVPNConnection::testLoopbackProxyRouteFixKeepsRoutingPolicy()
 {
     // The route fix itself is "--redirect-private local" on the helper's command line (the patched
@@ -710,10 +730,12 @@ void TestOpenVPNConnection::testFirewallAfterConnectionFollowsConfigRouting()
     // Without def1 the default route itself is replaced, so a direct /1 is more specific and wins.
     QVERIFY(!analyzeOvpnRouting("redirect-gateway\n").sendsAllIpv4ThroughTunnel({"route 0.0.0.0 128.0.0.0 net_gateway"}));
 #endif
-    // The in-tunnel DNS range is blocked off the tunnel even for custom configs: a direct route there
-    // is a real hole, unlike the rest of 10.0.0.0/8.
+    // Private ranges routed locally keep the firewall on, including any overlap with Windscribe's
+    // in-tunnel DNS range: the firewall blocks 10.255.255.0/24 off the tunnel on its own, and turning
+    // the whole firewall off over it would remove far more protection than it keeps.
     QVERIFY(analyzeOvpnRouting("redirect-gateway def1\nroute 10.20.0.0 255.255.0.0 net_gateway\n").sendsAllIpv4ThroughTunnel(noPush));
-    QVERIFY(!analyzeOvpnRouting("redirect-gateway def1\nroute 10.255.255.0 255.255.255.0 net_gateway\n").sendsAllIpv4ThroughTunnel(noPush));
+    QVERIFY(analyzeOvpnRouting("redirect-gateway def1\nroute 10.0.0.0 255.0.0.0 net_gateway\n").sendsAllIpv4ThroughTunnel(noPush));
+    QVERIFY(analyzeOvpnRouting("redirect-gateway def1\nroute 10.255.255.0 255.255.255.0 net_gateway\n").sendsAllIpv4ThroughTunnel(noPush));
     // Inline data never holds routing directives.
     QVERIFY(!analyzeOvpnRouting("<auth-user-pass>\nredirect-gateway def1\n</auth-user-pass>\n").sendsAllIpv4ThroughTunnel(noPush));
 
