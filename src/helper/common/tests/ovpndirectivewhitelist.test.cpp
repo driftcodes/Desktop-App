@@ -187,6 +187,12 @@ void testLoopbackWrapperRemote()
     VERIFY(!OvpnDirectiveWhitelist::hasLoopbackWrapperRemote("# remote 127.0.0.1\nremote 5.6.7.8 443\n"));
     VERIFY(!OvpnDirectiveWhitelist::hasLoopbackWrapperRemote("; via remote 127.0.0.1 locally\nremote 5.6.7.8 443\n"));
     VERIFY(!OvpnDirectiveWhitelist::hasLoopbackWrapperRemote("remote 127.0.0.10 443\n"));
+    // Inline data is not directives, even when a line reads like one.
+    VERIFY(!OvpnDirectiveWhitelist::hasLoopbackWrapperRemote(
+        "remote 5.6.7.8 443\n<auth-user-pass>\nremote 127.0.0.1\nsecret\n</auth-user-pass>\n"));
+    VERIFY(!OvpnDirectiveWhitelist::hasLoopbackWrapperRemote("<ca>\nremote 127.0.0.1\n</ca>\nremote 5.6.7.8 443\n"));
+    // <connection> blocks do hold directives.
+    VERIFY(OvpnDirectiveWhitelist::hasLoopbackWrapperRemote("<connection>\nremote 127.0.0.1 1194\n</connection>\n"));
 }
 
 // Blocked directives at the top level are always stripped; allowed ones pass.

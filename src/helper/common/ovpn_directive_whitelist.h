@@ -714,15 +714,39 @@ inline bool filterConfig(const std::string &config, std::string &out)
 }
 
 // Whether the config dials a local wrapper (stunnel/wstunnel): an actual "remote 127.0.0.1" directive,
-// not the text anywhere (a comment, or "remote 127.0.0.10"). Run on the filtered config, which is
-// what OpenVPN reads. The Windows helper then routes all IPv4 into the tunnel; the client's firewall
-// decision (OvpnRoutingPolicy) applies the same rule.
+// not the text anywhere (a comment, inline data such as an <auth-user-pass> block, or
+// "remote 127.0.0.10"). <connection> blocks hold directives, so their remote lines count. Run on the
+// filtered config, which is what OpenVPN reads. The Windows helper then routes all IPv4 into the
+// tunnel. The client's firewall decision (customconfigs::hasLoopbackWrapperRemote) is a separate
+// implementation of the same rule, with the same test cases.
 inline bool hasLoopbackWrapperRemote(const std::string &config)
 {
     std::istringstream stream(config);
     std::string line;
+    std::string openTag;
     while (std::getline(stream, line)) {
-        std::istringstream words(line);
+        const size_t first = line.find_first_not_of(" \t\r");
+        if (first == std::string::npos) {
+            continue;
+        }
+        const std::string trimmed = line.substr(first);
+        if (trimmed.rfind("</", 0) == 0) {
+            openTag.clear();
+            continue;
+        }
+        if (trimmed[0] == '<') {
+            const size_t end = trimmed.find('>');
+            std::string tag = trimmed.substr(1, end == std::string::npos ? std::string::npos : end - 1);
+            std::transform(tag.begin(), tag.end(), tag.begin(), [](unsigned char c) { return std::tolower(c); });
+            // A one-line block (<tag>...</tag>) closes on the same line.
+            openTag = trimmed.find("</") != std::string::npos ? std::string() : tag;
+            continue;
+        }
+        if (!openTag.empty() && openTag != "connection") {
+            continue;
+        }
+
+        std::istringstream words(trimmed);
         std::string directive;
         std::string host;
         if (!(words >> directive)) {

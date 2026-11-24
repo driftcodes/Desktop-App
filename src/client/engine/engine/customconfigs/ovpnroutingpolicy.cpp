@@ -26,15 +26,64 @@ bool isRouteOption(const QString &name)
     return name == "redirect-gateway" || name == "redirect-private" || name == "route";
 }
 
-// Applies one redirect-gateway / redirect-private option the way OpenVPN's add_option() does.
-void applyRedirectOption(const QStringList &tokens, bool &redirectIpv4)
+// Applies one redirect-gateway / redirect-private option the way OpenVPN's add_option() does: flags
+// accumulate (def1 stays once seen), and "!ipv4" clears the IPv4 redirection itself.
+void applyRedirectOption(const QStringList &tokens, bool &redirectIpv4, bool &def1)
 {
     const QString name = directiveName(tokens);
+    if (tokens.contains("def1")) {
+        def1 = true;
+    }
     if (tokens.contains("!ipv4")) {
         redirectIpv4 = false;
     } else if (name == "redirect-gateway") {
         redirectIpv4 = true;
     }
+}
+
+// Calls visit(tokens) for every directive line OpenVPN reads as a directive: comments are dropped, and
+// inline data blocks (<ca>, <auth-user-pass>, ...) are skipped. <connection> blocks hold directives
+// (remote among them), so their lines are visited when includeConnectionBlocks is set.
+template<typename Visitor>
+void forEachDirective(const QString &config, bool includeConnectionBlocks, Visitor visit)
+{
+    QString openTag;
+    const QStringList lines = config.split('\n');
+    for (const QString &line : lines) {
+        const QString trimmed = line.trimmed();
+        if (trimmed.startsWith("</")) {
+            openTag.clear();
+            continue;
+        }
+        if (trimmed.startsWith('<')) {
+            const int end = trimmed.indexOf('>');
+            const QString tag = trimmed.mid(1, end > 0 ? end - 1 : -1).trimmed().toLower();
+            // A one-line block (<tag>...</tag>) closes on the same line.
+            openTag = trimmed.contains("</") ? QString() : tag;
+            continue;
+        }
+        if (!openTag.isEmpty() && !(includeConnectionBlocks && openTag == "connection")) {
+            continue;
+        }
+        const QStringList tokens = tokenizeOvpnLine(trimmed);
+        if (!tokens.isEmpty()) {
+            visit(tokens);
+        }
+    }
+}
+
+// Address ranges the Windscribe firewall lets through whatever the tunnel does (LAN traffic when allowed,
+// link-local, multicast), matching helper/windows/firewallfilter.cpp.
+const QVector<std::pair<quint32, quint32>> &firewallExemptRanges()
+{
+    static const QVector<std::pair<quint32, quint32>> ranges = {
+        {0x0A000000u, 0x0AFFFFFFu},  // 10.0.0.0/8
+        {0xAC100000u, 0xAC1FFFFFu},  // 172.16.0.0/12
+        {0xC0A80000u, 0xC0A8FFFFu},  // 192.168.0.0/16
+        {0xA9FE0000u, 0xA9FEFFFFu},  // 169.254.0.0/16
+        {0xE0000000u, 0xEFFFFFFFu},  // 224.0.0.0/4
+    };
+    return ranges;
 }
 
 OvpnRoute routeFromTokens(const QStringList &tokens)
@@ -124,14 +173,13 @@ QStringList tokenizeOvpnLine(const QString &line)
 
 bool hasLoopbackWrapperRemote(const QString &config)
 {
-    const QStringList lines = config.split('\n');
-    for (const QString &line : lines) {
-        const QStringList tokens = tokenizeOvpnLine(line);
+    bool found = false;
+    forEachDirective(config, true, [&found](const QStringList &tokens) {
         if (directiveName(tokens) == "remote" && tokens.value(1) == "127.0.0.1") {
-            return true;
+            found = true;
         }
-    }
-    return false;
+    });
+    return found;
 }
 
 bool OvpnRoutingPolicy::isPushedOptionAccepted(const QString &option) const
@@ -150,6 +198,7 @@ bool OvpnRoutingPolicy::isPushedOptionAccepted(const QString &option) const
 bool OvpnRoutingPolicy::sendsAllIpv4ThroughTunnel(const QStringList &pushedOptions) const
 {
     bool redirectIpv4 = redirectsIpv4Locally;
+    bool def1 = redirectDef1;
     QVector<OvpnRoute> allRoutes = routes;
     QStringList ifconfigArgs = ifconfig;
     QString topologyName = topology;
@@ -163,7 +212,7 @@ bool OvpnRoutingPolicy::sendsAllIpv4ThroughTunnel(const QStringList &pushedOptio
             continue;
         }
         if (name == "redirect-gateway" || name == "redirect-private") {
-            applyRedirectOption(tokens, redirectIpv4);
+            applyRedirectOption(tokens, redirectIpv4, def1);
         } else if (name == "route") {
             allRoutes << routeFromTokens(tokens);
         } else if (name == "route-gateway") {
@@ -175,13 +224,15 @@ bool OvpnRoutingPolicy::sendsAllIpv4ThroughTunnel(const QStringList &pushedOptio
         }
     }
 
-    if (redirectIpv4) {
-        return true;
+    // Next hops inside the tunnel: the default VPN gateway (route-gateway), the ifconfig peer
+    // (net30/p2p) and any address on the tunnel adapter's subnet. Windows OpenVPN puts a route with an
+    // explicit gateway on the tunnel adapter when the gateway is inside that adapter's subnet, so the
+    // peer is a tunnel next hop even when a different route-gateway is pushed.
+    QVector<quint32> tunnelHops;
+    quint32 address = 0;
+    if (parseIpv4(routeGateway, address)) {
+        tunnelHops << address;
     }
-
-    // The VPN gateway (OpenVPN's remote_endpoint) and the tunnel's own subnet.
-    quint32 endpoint = 0;
-    bool hasEndpoint = parseIpv4(routeGateway, endpoint);
     quint32 subnetMask = 0;
     quint32 subnetNetwork = 0;
     bool hasSubnet = false;
@@ -196,8 +247,12 @@ bool OvpnRoutingPolicy::sendsAllIpv4ThroughTunnel(const QStringList &pushedOptio
                 subnetNetwork = local & mask;
                 hasSubnet = true;
             }
-        } else if (!hasEndpoint) {
-            hasEndpoint = parseIpv4(ifconfigArgs[1], endpoint);
+        } else if (parseIpv4(ifconfigArgs[1], address)) {
+            tunnelHops << address;
+            // A net30 adapter sits on the /30 holding both ends.
+            subnetMask = 0xFFFFFFFCu;
+            subnetNetwork = local & subnetMask;
+            hasSubnet = (address & subnetMask) == subnetNetwork;
         }
     }
 
@@ -205,19 +260,31 @@ bool OvpnRoutingPolicy::sendsAllIpv4ThroughTunnel(const QStringList &pushedOptio
         if (gateway.isEmpty() || gateway == "default" || gateway == "vpn_gateway") {
             return true;
         }
-        quint32 address = 0;
-        if (!parseIpv4(gateway, address)) {
+        quint32 hop = 0;
+        if (!parseIpv4(gateway, hop)) {
             return false;  // net_gateway, remote_host or a hostname
         }
-        return (hasEndpoint && address == endpoint) || (hasSubnet && (address & subnetMask) == subnetNetwork);
+        return tunnelHops.contains(hop) || (hasSubnet && (hop & subnetMask) == subnetNetwork);
     };
 
-    // Whether the routes through the tunnel cover all of 0.0.0.0-255.255.255.255.
-    QVector<std::pair<quint64, quint64>> ranges;
-    for (const OvpnRoute &route : std::as_const(allRoutes)) {
-        if (!isTunnelGateway(route.gateway)) {
-            continue;
+    // Every route the daemon installs, as address ranges with their prefix length. Redirection adds
+    // 0.0.0.0/1 + 128.0.0.0/1 (def1) or replaces the default route (/0) through the tunnel.
+    struct RangeRoute
+    {
+        quint64 first;
+        quint64 last;
+        int prefix;
+        bool tunnel;
+    };
+    QVector<RangeRoute> installed;
+    if (redirectIpv4) {
+        if (def1) {
+            installed << RangeRoute{0, 0x7FFFFFFFull, 1, true} << RangeRoute{0x80000000ull, 0xFFFFFFFFull, 1, true};
+        } else {
+            installed << RangeRoute{0, 0xFFFFFFFFull, 0, true};
         }
+    }
+    for (const OvpnRoute &route : std::as_const(allRoutes)) {
         quint32 network = 0;
         quint32 mask = 0xFFFFFFFF;
         if (!parseIpv4(route.network, network)) {
@@ -227,46 +294,80 @@ bool OvpnRoutingPolicy::sendsAllIpv4ThroughTunnel(const QStringList &pushedOptio
             continue;
         }
         const quint64 first = network & mask;
-        ranges.append({first, first + static_cast<quint64>(~mask)});
+        installed << RangeRoute{first, first + static_cast<quint64>(~mask), qPopulationCount(mask), isTunnelGateway(route.gateway)};
     }
-    std::sort(ranges.begin(), ranges.end());
-    quint64 nextUncovered = 0;
-    for (const auto &range : std::as_const(ranges)) {
-        if (range.first > nextUncovered) {
+
+    // Addresses that may stay outside the tunnel without the firewall blocking them: its LAN /
+    // link-local / multicast exceptions and the VPN server itself (always whitelisted while connecting).
+    QVector<std::pair<quint64, quint64>> exempt;
+    for (const auto &range : firewallExemptRanges()) {
+        exempt << std::pair<quint64, quint64>(range.first, range.second);
+    }
+    for (const QString &remote : remoteIps) {
+        if (parseIpv4(remote, address)) {
+            exempt << std::pair<quint64, quint64>(address, address);
+        }
+    }
+
+    // Walk the address space in pieces that no route or exemption boundary splits. Each piece goes
+    // where its most specific route sends it (longest prefix; a tie counts as the tunnel). A piece
+    // that leaves the tunnel, or has no route at all (the system default), must be exempt.
+    QVector<quint64> bounds = {0, 0x100000000ull};
+    for (const RangeRoute &route : std::as_const(installed)) {
+        bounds << route.first << route.last + 1;
+    }
+    for (const auto &range : std::as_const(exempt)) {
+        bounds << range.first << range.second + 1;
+    }
+    std::sort(bounds.begin(), bounds.end());
+    bounds.erase(std::unique(bounds.begin(), bounds.end()), bounds.end());
+
+    for (int i = 0; i + 1 < bounds.size(); ++i) {
+        const quint64 start = bounds[i];
+        int bestPrefix = -1;
+        bool bestIsTunnel = false;
+        for (const RangeRoute &route : std::as_const(installed)) {
+            if (route.first <= start && start <= route.last) {
+                if (route.prefix > bestPrefix) {
+                    bestPrefix = route.prefix;
+                    bestIsTunnel = route.tunnel;
+                } else if (route.prefix == bestPrefix && route.tunnel) {
+                    bestIsTunnel = true;
+                }
+            }
+        }
+        if (bestPrefix >= 0 && bestIsTunnel) {
+            continue;
+        }
+        const bool isExempt = std::any_of(exempt.begin(), exempt.end(), [start](const std::pair<quint64, quint64> &range) {
+            return range.first <= start && start <= range.second;
+        });
+        if (!isExempt) {
             return false;
         }
-        nextUncovered = std::max(nextUncovered, range.second + 1);
     }
-    return nextUncovered > 0xFFFFFFFFull;
+    return true;
 }
 
 OvpnRoutingPolicy analyzeOvpnRouting(const QString &config)
 {
     OvpnRoutingPolicy policy;
-    bool insideInlineBlock = false;
 
-    const QStringList lines = config.split('\n');
-    for (const QString &line : lines) {
-        const QString trimmed = line.trimmed();
-        // Inline blocks (<ca>...</ca> and the like) hold key material, never routing directives.
-        if (insideInlineBlock) {
-            if (trimmed.startsWith("</")) {
-                insideInlineBlock = false;
-            }
-            continue;
+    // The VPN server addresses (remote lines, <connection> blocks included).
+    forEachDirective(config, true, [&policy](const QStringList &tokens) {
+        if (directiveName(tokens) == "remote" && tokens.size() >= 2) {
+            policy.remoteIps << tokens[1];
         }
-        if (trimmed.startsWith('<') && !trimmed.startsWith("</")) {
-            insideInlineBlock = !trimmed.contains("</");
-            continue;
-        }
+    });
 
-        const QStringList tokens = tokenizeOvpnLine(trimmed);
+    // Routing directives are only valid at the top level.
+    forEachDirective(config, false, [&policy](const QStringList &tokens) {
         const QString name = directiveName(tokens);
         // Only directives that reach the daemon count. The helper strips the ones not on its allowlist,
         // among them route-noexec, route-gateway and redirect-private (the patched daemon would reject
         // them anyway).
         if (name == "redirect-gateway") {
-            applyRedirectOption(tokens, policy.redirectsIpv4Locally);
+            applyRedirectOption(tokens, policy.redirectsIpv4Locally, policy.redirectDef1);
         } else if (name == "route") {
             policy.routes << routeFromTokens(tokens);
         } else if (name == "ifconfig") {
@@ -278,7 +379,7 @@ OvpnRoutingPolicy analyzeOvpnRouting(const QString &config)
         } else if (name == "pull-filter" && tokens.size() >= 3) {
             policy.pullFilters.append(OvpnPullFilter{tokens[1], tokens[2]});
         }
-    }
+    });
 
 #ifdef Q_OS_WIN
     // For a config that dials a local wrapper (stunnel/wstunnel), the Windows helper appends

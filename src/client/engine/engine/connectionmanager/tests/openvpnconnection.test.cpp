@@ -687,11 +687,36 @@ void TestOpenVPNConnection::testFirewallAfterConnectionFollowsConfigRouting()
     // A non-contiguous netmask is not a route OpenVPN would install as such.
     QVERIFY(!analyzeOvpnRouting("route 0.0.0.0 128.0.0.0\nroute 128.0.0.0 255.0.255.0\n").sendsAllIpv4ThroughTunnel(noPush));
 
+    // The point-to-point peer is a tunnel next hop even when a separate route-gateway is pushed.
+    QVERIFY(analyzeOvpnRouting(ignoreRedirect)
+                .sendsAllIpv4ThroughTunnel({"topology net30", "ifconfig 10.8.0.6 10.8.0.5", "route-gateway 10.8.0.1",
+                                            "route 0.0.0.0 128.0.0.0 10.8.0.5", "route 128.0.0.0 128.0.0.0 10.8.0.5"}));
+
+    // A more specific direct route wins over the tunnel for its addresses (longest prefix).
+    QVERIFY(!analyzeOvpnRouting("route 0.0.0.0 128.0.0.0 vpn_gateway\nroute 128.0.0.0 128.0.0.0 vpn_gateway\n"
+                                "route 203.0.113.0 255.255.255.0 net_gateway\n").sendsAllIpv4ThroughTunnel(noPush));
+    QVERIFY(!analyzeOvpnRouting("redirect-gateway def1\nroute 8.8.8.8 255.255.255.255 net_gateway\n").sendsAllIpv4ThroughTunnel(noPush));
+    // ...unless the firewall lets those addresses through anyway: LAN ranges and the VPN server itself.
+    QVERIFY(analyzeOvpnRouting("redirect-gateway def1\nroute 192.168.0.0 255.255.0.0 net_gateway\n").sendsAllIpv4ThroughTunnel(noPush));
+    QVERIFY(analyzeOvpnRouting("redirect-gateway def1\nroute 5.6.7.8 255.255.255.255 net_gateway\nremote 5.6.7.8 443\n")
+                .sendsAllIpv4ThroughTunnel(noPush));
+    // A direct /1 next to def1's /1 ties; a tie counts as the tunnel (OpenVPN installs both).
+    QVERIFY(analyzeOvpnRouting("redirect-gateway def1\n").sendsAllIpv4ThroughTunnel({"route 0.0.0.0 128.0.0.0 net_gateway"}));
+    // Without def1 the default route itself is replaced, so a direct /1 is more specific and wins.
+    QVERIFY(!analyzeOvpnRouting("redirect-gateway\n").sendsAllIpv4ThroughTunnel({"route 0.0.0.0 128.0.0.0 net_gateway"}));
+    // Inline data never holds routing directives.
+    QVERIFY(!analyzeOvpnRouting("<auth-user-pass>\nredirect-gateway def1\n</auth-user-pass>\n").sendsAllIpv4ThroughTunnel(noPush));
+
     // Only an actual "remote 127.0.0.1" directive marks a local-wrapper config, not a comment.
     QVERIFY(customconfigs::hasLoopbackWrapperRemote("client\nremote 127.0.0.1\nport 1194\n"));
     QVERIFY(!customconfigs::hasLoopbackWrapperRemote("# via remote 127.0.0.1\nremote 5.6.7.8 443\n"));
     QVERIFY(!customconfigs::hasLoopbackWrapperRemote("remote 5.6.7.8 443 # not remote 127.0.0.1\n"));
     QVERIFY(!customconfigs::hasLoopbackWrapperRemote("remote 127.0.0.10 443\n"));
+    // Same cases as the helper's hasLoopbackWrapperRemote test: inline data is not directives, a
+    // <connection> block is.
+    QVERIFY(!customconfigs::hasLoopbackWrapperRemote("remote 5.6.7.8 443\n<auth-user-pass>\nremote 127.0.0.1\nsecret\n</auth-user-pass>\n"));
+    QVERIFY(!customconfigs::hasLoopbackWrapperRemote("<ca>\nremote 127.0.0.1\n</ca>\nremote 5.6.7.8 443\n"));
+    QVERIFY(customconfigs::hasLoopbackWrapperRemote("<connection>\nremote 127.0.0.1 1194\n</connection>\n"));
     QVERIFY(!analyzeOvpnRouting("# remote 127.0.0.1\nroute 10.20.0.0 255.255.0.0\nremote 5.6.7.8 443\n")
                  .sendsAllIpv4ThroughTunnel(noPush));
 

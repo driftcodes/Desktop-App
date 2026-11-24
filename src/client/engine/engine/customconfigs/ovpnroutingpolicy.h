@@ -31,8 +31,12 @@ struct OvpnRoute
 //   otherwise the ifconfig peer for net30/p2p topologies.
 struct OvpnRoutingPolicy
 {
-    // IPv4 redirection after the config's own redirect-gateway lines, in order.
+    // IPv4 redirection after the config's own redirect-gateway lines, in order, and whether one of
+    // them asked for def1 (0.0.0.0/1 + 128.0.0.0/1 instead of replacing the default route).
     bool redirectsIpv4Locally = false;
+    bool redirectDef1 = false;
+    // The addresses of the config's remote lines: the firewall lets traffic to the VPN server through.
+    QStringList remoteIps;
     QVector<OvpnRoute> routes;
     QStringList ifconfig;        // the config's own "ifconfig <local> <remote|netmask>" arguments
     QString topology;            // the config's own topology, empty if not given
@@ -43,8 +47,10 @@ struct OvpnRoutingPolicy
     // Whether OpenVPN would apply this pushed option line (pull-filter and route-nopull).
     bool isPushedOptionAccepted(const QString &option) const;
 
-    // Whether the tunnel carries all IPv4 traffic, given every option line the server pushed, in
-    // order: IPv4 redirection is on, or the routes through the tunnel cover the whole IPv4 space.
+    // Whether the tunnel carries all IPv4 traffic the firewall would otherwise block, given every option
+    // line the server pushed, in order. Every address goes where its most specific route sends it; an
+    // address may leave the tunnel only if the firewall exempts it anyway (LAN, link-local, multicast,
+    // the VPN server).
     bool sendsAllIpv4ThroughTunnel(const QStringList &pushedOptions) const;
 };
 
