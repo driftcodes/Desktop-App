@@ -95,8 +95,10 @@ private:
     bool isLogPings_;
     bool isUseIcmpPings_;
 
-    // IPs to update when in disconnected state
+    // IPs to update when in disconnected state. hasPendingIps_ tells an update to an empty list
+    // (e.g. clearIps() while connected) apart from no update at all.
     QVector<PingIpInfo> pendingIps_;
+    bool hasPendingIps_ = false;
 
     void onPingFinished(const std::string &ip, bool isSuccess, std::int32_t timeMs, bool isFromDisconnectedVpnState);
 

@@ -42,6 +42,10 @@ void CustomConfigConnectionAttemptStrategy::debugLocationInfoToLog() const
 
 void CustomConfigConnectionAttemptStrategy::putFailedConnection()
 {
+    // No endpoint was selected (nor resolved) for a config the proxy cannot use.
+    if (hasNoProxyUsableRemote()) {
+        return;
+    }
     locationInfo_->selectNextNode();
     skipToTcpNodeIfRequired();
 }
@@ -51,9 +55,24 @@ bool CustomConfigConnectionAttemptStrategy::isFailed() const
     return false;
 }
 
+bool CustomConfigConnectionAttemptStrategy::hasNoProxyUsableRemote() const
+{
+    return tcpOnly_ && !locationInfo_->hasRemoteWithProtocol("tcp");
+}
+
 CurrentConnectionDescr CustomConfigConnectionAttemptStrategy::getCurrentConnectionSettings() const
 {
     CurrentConnectionDescr ccd;
+
+    // A proxy is set and nothing in this config can use it (UDP-only OpenVPN, or WireGuard): report
+    // the config's protocol without any endpoint, so ConnectionManager refuses with kProxyRequiresTcp
+    // before anything is resolved or dialed.
+    if (hasNoProxyUsableRemote()) {
+        ccd.connectionNodeType = CONNECTION_NODE_CUSTOM_CONFIG;
+        ccd.protocol = locationInfo_->configType() == CUSTOM_CONFIG_WIREGUARD ? types::Protocol::WIREGUARD
+                                                                               : types::Protocol::OPENVPN_UDP;
+        return ccd;
+    }
 
     if (locationInfo_->isExistSelectedNode()) {
         ccd.connectionNodeType = CONNECTION_NODE_CUSTOM_CONFIG;
@@ -79,7 +98,13 @@ bool CustomConfigConnectionAttemptStrategy::isAutomaticMode()
 
 void CustomConfigConnectionAttemptStrategy::resolveHostnames()
 {
-    locationInfo_->resolveHostnames();
+    if (hasNoProxyUsableRemote()) {
+        // Nothing to dial through the proxy: do not look any hostname up directly.
+        emit hostnamesResolved();
+        return;
+    }
+    // Under a proxy only the TCP remotes are kept and looked up.
+    locationInfo_->resolveHostnames(tcpOnly_ ? QString("tcp") : QString());
 }
 
 types::Protocol CustomConfigConnectionAttemptStrategy::preResolveProtocol() const

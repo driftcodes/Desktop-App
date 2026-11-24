@@ -253,12 +253,31 @@ void TestCustomConfigLocationInfo::testSharedHostnameResolvesEveryRemote()
 
     // One answer resolves both remotes, so the attempt can proceed (it used to hang here).
     QCOMPARE(resolvedSpy.count(), 1);
+    // A second answer for the same name (a duplicate lookup) must not start the attempt again.
+    info->onDnsRequestFinished("vpn.example.com", std::make_shared<FakeDnsResult>(std::vector<std::string>{"5.6.7.8"}));
+    QCOMPARE(resolvedSpy.count(), 1);
     QVERIFY(info->remotes_[0].isResolved);
     QVERIFY(info->remotes_[1].isResolved);
     QCOMPARE(info->remotes_[1].ipsForHostname_, QStringList() << "5.6.7.8");
     QVERIFY(info->selectNodeWithProtocol("tcp"));
     QCOMPARE(info->getSelectedPort(), 443u);
     QVERIFY(info->getOvpnConfigForSelectedEndpoint().endsWith("remote 5.6.7.8 443 tcp\r\n"));
+}
+
+void TestCustomConfigLocationInfo::testResolveOnlyProtocolKeepsMatchingRemotes()
+{
+    auto info = makeOvpnCustomConfigLocationInfo("dev tun\nauth-user-pass\nremote 1.2.3.4 1194 udp\nremote 5.6.7.8 443 tcp\n");
+    QVERIFY(info);
+    QVERIFY(info->hasRemoteWithProtocol("tcp"));
+    QVERIFY(info->hasRemoteWithProtocol("UDP"));
+    info->resolveHostnames("tcp");
+    QCOMPARE(info->remotes_.count(), 1);
+    QCOMPARE(info->getSelectedIp(), QString("5.6.7.8"));
+    QCOMPARE(info->getSelectedProtocol(), QString("tcp"));
+
+    auto udpOnly = makeOvpnCustomConfigLocationInfo("dev tun\nauth-user-pass\nremote 1.2.3.4 1194 udp\n");
+    QVERIFY(udpOnly);
+    QVERIFY(!udpOnly->hasRemoteWithProtocol("tcp"));
 }
 
 QTEST_MAIN(TestCustomConfigLocationInfo)

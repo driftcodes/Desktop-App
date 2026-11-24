@@ -186,10 +186,6 @@ void testTopLevelDirectiveFiltering()
     VERIFY(filters("plugin /e.so\nremote example.com 1194\n", out));
     VERIFY(!contains(out, "plugin"));
     VERIFY(contains(out, "remote example.com 1194"));
-
-    // The client appends this when OpenVPN goes through a proxy on this machine.
-    VERIFY(filters("remote example.com 443\nredirect-private local\n", out));
-    VERIFY(contains(out, "redirect-private local"));
 }
 
 // dhcp-option is whitelisted by name, but its DNS value reaches the root DNS hook scripts. The

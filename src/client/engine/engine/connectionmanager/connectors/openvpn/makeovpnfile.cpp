@@ -24,7 +24,7 @@ void MakeOVPNFile::appendDnsOverride(QString &config, const QString &dnsServer)
     config += QString("dhcp-option DNS %1\r\n").arg(dnsServer);
 }
 
-void MakeOVPNFile::addLoopbackProxyRouteFix(QString &config)
+void MakeOVPNFile::removeAutolocalForLoopbackProxy(QString &config)
 {
     static const QRegularExpression whitespace("\\s+");
     QStringList lines = config.split('\n');
@@ -57,8 +57,6 @@ void MakeOVPNFile::addLoopbackProxyRouteFix(QString &config)
         }
     }
     config = lines.join('\n');
-    config += "\r\nredirect-private local\r\n";
-    qCInfo(LOG_CONNECTION) << "Proxy is on this machine: added 'redirect-private local' so OpenVPN does not route the proxy address via the physical gateway";
 }
 
 bool MakeOVPNFile::generate(const QString &ovpnData, const QString &ip, types::Protocol protocol, uint port,

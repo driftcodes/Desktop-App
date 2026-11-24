@@ -39,7 +39,7 @@ OpenVPNConnection::OpenVPNConnection(QObject *parent, Helper *helper, types::Pro
     adapterReadyTimer_(io_context_),
 #endif
     currentState_(STATUS_DISCONNECTED),
-    isRedirectGatewayObserved_(false), privKeyPassword_("")
+    privKeyPassword_("")
 {
     capabilities_ = openVpnConnectorCapabilities();
 
@@ -80,7 +80,7 @@ void OpenVPNConnection::prepareImpl()
         }
         routingPolicy_ = customconfigs::analyzeOvpnRouting(config_);
         if (isProxyForwarded() && isLoopbackProxy()) {
-            MakeOVPNFile::addLoopbackProxyRouteFix(config_);
+            MakeOVPNFile::removeAutolocalForLoopbackProxy(config_);
         }
         finishPrepare();
         return;
@@ -138,7 +138,7 @@ void OpenVPNConnection::prepareImpl()
     config_ = makeOVPNFile.config();
     routingPolicy_ = customconfigs::analyzeOvpnRouting(config_);
     if (isProxyForwarded() && isLoopbackProxy()) {
-        MakeOVPNFile::addLoopbackProxyRouteFix(config_);
+        MakeOVPNFile::removeAutolocalForLoopbackProxy(config_);
     }
 
     if (descr_.protocol == types::Protocol::STUNNEL) {
@@ -266,7 +266,8 @@ void OpenVPNConnection::startConnect()
 
     setCurrentState(STATUS_CONNECTING);
     // The connection state (config, credentials, proxy) was populated by prepare().
-    isRedirectGatewayObserved_ = false;
+    pushedOptions_.clear();
+    isFullIpv4Tunnel_ = routingPolicy_.sendsAllIpv4ThroughTunnel(QStringList());
     isDialed_ = true;
 
     stateVariables_.reset();
@@ -299,9 +300,9 @@ bool OpenVPNConnection::isDisconnected() const
 
 bool OpenVPNConnection::isAllowFirewallAfterConnectionRuntime() const
 {
-    // The config's own redirect-gateway or 0.0.0.0/1 + 128.0.0.0/1 routes count as well as a pushed
-    // redirect-gateway, unless the config drops the push (route-nopull / pull-filter) or runs no routes.
-    return routingPolicy_.sendsAllIpv4ThroughTunnel(isRedirectGatewayObserved_);
+    // The config's own redirect-gateway or 0.0.0.0/1 + 128.0.0.0/1 routes count as well as what the
+    // server pushed and the config lets through (route-nopull / pull-filter), with OpenVPN's rules.
+    return isFullIpv4Tunnel_;
 }
 
 void OpenVPNConnection::continueWithUserInput(const UserInputResponse &response)
@@ -885,6 +886,9 @@ void OpenVPNConnection::handleRead(const boost::system::error_code &err, size_t 
             }
             else if (serverReply.contains("RECONNECTING", Qt::CaseInsensitive))
             {
+                // The server pushes its options again on the next session.
+                pushedOptions_.clear();
+                isFullIpv4Tunnel_ = routingPolicy_.sendsAllIpv4ThroughTunnel(QStringList());
                 stateVariables_.isAcceptSigTermCommand_ = false;
                 stateVariables_.bWasStateNotification = false;
                 setCurrentState(STATUS_CONNECTED_TO_SOCKET);
@@ -957,12 +961,10 @@ void OpenVPNConnection::handleRead(const boost::system::error_code &err, size_t 
                     qCCritical(LOG_CONNECTION) << "Can't parse PUSH Received control message";
                 }
 
-                if (isRedirectDefaultGateway)
-                {
-                    // We are going to set up the default gateway, so firewall is allowed after
-                    // we have connected (the config-file directive is applied Engine-side).
-                    isRedirectGatewayObserved_ = true;
-                }
+                // A push can span several messages (push-continuation); judge them together with
+                // the config, which may filter or override what the server sends.
+                pushedOptions_ << customconfigs::pushReplyOptions(serverReply);
+                isFullIpv4Tunnel_ = routingPolicy_.sendsAllIpv4ThroughTunnel(pushedOptions_);
             } else if (serverReply.contains("write UDP: Unknown error (code=10065)") || serverReply.contains("write UDP: Unknown error (code=10054)")) {
                 // These errors indicate socket was closed or otherwise unavailable for writing.
                 setCurrentStateAndEmitDisconnected(STATUS_DISCONNECTED);
@@ -1102,7 +1104,9 @@ bool OpenVPNConnection::parsePushReply(const QString &reply, AdapterGatewayInfo 
     const QString str2 = reply.mid(firstQuote + 1, lastQuote - firstQuote - 1);
     const QStringList values = str2.split(',');
 
-    outRedirectDefaultGateway = false;
+    // OpenVPN's rules for the pushed redirect alone: no def1 still redirects, "!ipv4" does not. The
+    // connection combines this with the config's own routing (routingPolicy_).
+    outRedirectDefaultGateway = customconfigs::OvpnRoutingPolicy().sendsAllIpv4ThroughTunnel(customconfigs::pushReplyOptions(reply));
     outConnectionAdapterInfo.clear();
 
     for (auto it : values)
@@ -1112,11 +1116,7 @@ bool OpenVPNConnection::parsePushReply(const QString &reply, AdapterGatewayInfo 
         const QStringList v = it.split(' ');
         const QString &option = v.first();
 
-        if (it.contains("redirect-gateway def1", Qt::CaseInsensitive))
-        {
-            outRedirectDefaultGateway = true;
-        }
-        else if (option.compare("route-gateway", Qt::CaseInsensitive) == 0)
+        if (option.compare("route-gateway", Qt::CaseInsensitive) == 0)
         {
             if (v.count() != 2)
             {

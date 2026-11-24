@@ -160,6 +160,15 @@ bool writeOVPNFile(const std::string &dnsScript, const std::string &config, cons
         extraArgs.insert(extraArgs.end(), {"--socks-proxy", socksProxy, std::to_string(socksPort)});
     }
 
+    // Behind a proxy, OpenVPN's "remote" for routing purposes is the proxy address; redirect-gateway
+    // would route a loopback proxy via the physical gateway. The "local" flag skips only that host
+    // route and enables no redirection itself. On the command line because the config-file
+    // allowlists do not include redirect-private.
+    const std::string &proxyAddress = httpProxy.length() > 0 ? httpProxy : socksProxy;
+    if (proxyAddress.rfind("127.", 0) == 0 || proxyAddress == "::1") {
+        extraArgs.insert(extraArgs.end(), {"--redirect-private", "local"});
+    }
+
     return true;
 }
 

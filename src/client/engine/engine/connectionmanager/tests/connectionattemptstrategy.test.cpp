@@ -636,6 +636,56 @@ void TestConnectionAttemptStrategy::testCustomConfigOvpnDescriptorAndNodeAdvance
     QCOMPARE(strategy.getCurrentConnectionSettings().ip, QString("1.2.3.4"));
 }
 
+void TestConnectionAttemptStrategy::testCustomConfigUnderProxyKeepsOnlyTcpRemotes()
+{
+    auto li = makeOvpnCustomConfigLocationInfo(
+        "dev tun\nauth-user-pass\nremote 1.2.3.4 1194 udp\nremote 5.6.7.8 443 tcp\nremote 9.9.9.9 1195 udp\n");
+    QVERIFY(!li.isNull());
+
+    CustomConfigConnectionAttemptStrategy strategy(li, true);
+    QSignalSpy resolvedSpy(&strategy, &IConnectionAttemptStrategy::hostnamesResolved);
+    strategy.resolveHostnames();
+    QCOMPARE(resolvedSpy.count(), 1);
+
+    // Only the TCP remote is kept, so failures never walk onto a UDP one.
+    for (int i = 0; i < 3; ++i) {
+        const CurrentConnectionDescr descr = strategy.getCurrentConnectionSettings();
+        QCOMPARE(descr.connectionNodeType, CONNECTION_NODE_CUSTOM_CONFIG);
+        QCOMPARE(descr.ip, QString("5.6.7.8"));
+        QCOMPARE(descr.protocol, types::Protocol(types::Protocol::OPENVPN_TCP));
+        strategy.putFailedConnection();
+    }
+}
+
+void TestConnectionAttemptStrategy::testCustomConfigUnderProxyWithoutTcpRemoteResolvesNothing()
+{
+    // Hostnames: resolving would send a direct DNS query, which must not happen for a config the
+    // proxy cannot carry. The strategy answers at once with the UDP protocol and no endpoint, and
+    // ConnectionManager refuses it with kProxyRequiresTcp.
+    auto li = makeOvpnCustomConfigLocationInfo("dev tun\nauth-user-pass\nremote vpn.example.com 1194 udp\n");
+    QVERIFY(!li.isNull());
+
+    CustomConfigConnectionAttemptStrategy strategy(li, true);
+    QSignalSpy resolvedSpy(&strategy, &IConnectionAttemptStrategy::hostnamesResolved);
+    strategy.resolveHostnames();
+    QCOMPARE(resolvedSpy.count(), 1);
+
+    const CurrentConnectionDescr descr = strategy.getCurrentConnectionSettings();
+    QCOMPARE(descr.connectionNodeType, CONNECTION_NODE_CUSTOM_CONFIG);
+    QCOMPARE(descr.protocol, types::Protocol(types::Protocol::OPENVPN_UDP));
+    QVERIFY(descr.ip.isEmpty());
+    strategy.putFailedConnection();  // must not touch the (empty) endpoint list
+
+    // WireGuard configs cannot use the proxy either.
+    auto wg = makeWireGuardCustomConfigLocationInfo("vpn.example.com:51820");
+    QVERIFY(!wg.isNull());
+    CustomConfigConnectionAttemptStrategy wgStrategy(wg, true);
+    QSignalSpy wgResolvedSpy(&wgStrategy, &IConnectionAttemptStrategy::hostnamesResolved);
+    wgStrategy.resolveHostnames();
+    QCOMPARE(wgResolvedSpy.count(), 1);
+    QCOMPARE(wgStrategy.getCurrentConnectionSettings().protocol, types::Protocol(types::Protocol::WIREGUARD));
+}
+
 void TestConnectionAttemptStrategy::testCustomConfigWireGuardDescriptor()
 {
     auto li = makeWireGuardCustomConfigLocationInfo();

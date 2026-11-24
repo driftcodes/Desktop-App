@@ -15,8 +15,9 @@ by Windscribe's own servers.
   If not, it stops with "Windscribe could not reach the proxy at …" instead of retrying forever.
 - **Proxy on this PC (127.x.x.x).** OpenVPN normally adds a route sending its "remote" through your
   physical gateway; behind a proxy that remote is 127.0.0.1, which Windows refuses
-  (`CONNECTED,ROUTE_ERROR`). The app adds one line, `redirect-private local`, whose `local` flag makes
-  OpenVPN skip exactly that route. Each profile keeps its own routing: a full-tunnel profile stays full
+  (`CONNECTED,ROUTE_ERROR`). The helper starts OpenVPN with `--redirect-private local`, whose `local`
+  flag makes OpenVPN skip exactly that route. It goes on the command line because Windscribe's
+  patched OpenVPN refuses `redirect-private` inside a config file. Each profile keeps its own routing: a full-tunnel profile stays full
   tunnel, and a profile that only routes, say, `10.20.0.0/16` keeps doing only that. This applies to
   Windscribe servers too, so you can remove the three lines you added to Advanced Parameters (keeping
   them does no harm):
@@ -40,17 +41,21 @@ Emergency Connect is unchanged and never uses the proxy.
 
 ### Still direct (not changed yet)
 
-- When you connect to an imported profile whose `remote` is a hostname, the app looks it up with your
-  normal DNS before handing the resulting IP to OpenVPN. Use IP addresses in `remote` lines to avoid
-  this lookup.
+- When you connect to an imported profile whose TCP `remote` is a hostname, the app looks it up with
+  your normal DNS before handing the resulting IP to OpenVPN. Use IP addresses in `remote` lines to
+  avoid this lookup. With the proxy on, UDP remotes are never looked up, and a profile with no TCP
+  remote is refused without any lookup.
 - While connecting and connected, the server's IP is on the firewall's allowed list (as in the official
   app). That permits traffic to it but does not send any.
 
 ### Firewall behaviour
 
 In Automatic mode the firewall only stays on after connecting when the tunnel carries all IPv4 traffic.
-The app now decides this from the profile as a whole: its own `redirect-gateway`, its own `0.0.0.0/1` +
-`128.0.0.0/1` routes, or a server-pushed `redirect-gateway` that the profile does not ignore. Before,
+The app now decides this the way OpenVPN does, from the profile and everything the server pushed: the
+profile's own `redirect-gateway`, its own `0.0.0.0/1` + `128.0.0.0/1` routes, or a pushed
+`redirect-gateway` (with or without `def1`) or pushed `/1` routes that the profile does not drop with
+`route-nopull` or a matching `pull-filter` (a case-sensitive prefix match, quotes included). A
+`redirect-gateway` carrying `!ipv4`, pushed or not, means IPv4 is not redirected. Before,
 an imported profile with `pull-filter ignore redirect-gateway` (even with its own full routes), or one
 whose `redirect-gateway` was in the file rather than pushed by the server, made Automatic / Before
 Connection switch the firewall off once connected. A profile that really only routes some networks
@@ -66,7 +71,10 @@ switches the firewall off.
    are cached, so later runs take much less. If the first run hits the time limit, run it again; it
    continues from the cache.
 4. Download the installer from the finished run's **Artifacts** section (a zip containing
-   `installer.exe`).
+   `installer.exe`). Use it only from a run that is green all the way: after building, the workflow
+   starts the packaged OpenVPN with the helper's proxy options to check they are accepted, then builds
+   and runs the unit tests. The installer is uploaded before the tests run, so a red run can still
+   have one; don't use it.
 
 ### Signed build (recommended)
 

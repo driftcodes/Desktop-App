@@ -91,10 +91,6 @@ inline const std::unordered_set<std::string>& allowedDirectives()
         // Routing, DNS & network
         "route",
         "redirect-gateway",
-        // The client adds "redirect-private local" when OpenVPN reaches the server through a proxy on
-        // this machine: it only stops OpenVPN routing the (loopback) proxy address via the physical
-        // gateway. It grants nothing beyond what redirect-gateway already allows.
-        "redirect-private",
         "route-nopull",
         "pull",
         "pull-filter",

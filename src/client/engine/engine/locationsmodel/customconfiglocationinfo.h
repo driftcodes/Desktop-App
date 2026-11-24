@@ -25,7 +25,10 @@ public:
     QString getLogString() const override;
     QString getVerifyX509name() const override { return ""; }
 
-    void resolveHostnames();
+    // onlyProtocol (e.g. "tcp"): keep and resolve only the OpenVPN remotes using that protocol.
+    void resolveHostnames(const QString &onlyProtocol = QString());
+    // Whether the OpenVPN config has a remote using this protocol (always false for WireGuard).
+    bool hasRemoteWithProtocol(const QString &protocol) const;
 
     // ovpn-specific
     QString getSelectedIp() const;
@@ -71,7 +74,7 @@ private:
     };
 
     void resolveHostnamesForWireGuardConfig();
-    void resolveHostnamesForOVPNConfig();
+    void resolveHostnamesForOVPNConfig(const QString &onlyProtocol);
     QString getSelectedRemoteCommand() const;
     QString getOvpnData() const;
 

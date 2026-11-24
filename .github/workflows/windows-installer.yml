@@ -182,6 +182,60 @@ jobs:
           if ($bad.Count -gt 0) { throw "Not signed with CN=$($env:WS_SIGNING_CERT_SUBJECT): $($bad -join ', ')" }
           Write-Output "All $($files.Count) binaries are signed by CN=$($env:WS_SIGNING_CERT_SUBJECT)"
 
+      # The packaged OpenVPN is patched with Windscribe's own config-file allowlist (fatal for anything
+      # unlisted). Start it the way the helper does for an imported TCP profile behind a proxy on this
+      # PC, and fail if any option is rejected. --management-hold parks it right after option parsing,
+      # before any network or adapter work.
+      - name: Smoke-test the packaged OpenVPN with proxy options
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Path build/temp/InstallerFiles -Filter '*openvpn.exe' | Select-Object -First 1
+          if (-not $exe) { throw "OpenVPN executable not found in build/temp/InstallerFiles" }
+          $dir = Join-Path $env:RUNNER_TEMP 'ovpn-smoke'
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          $config = Join-Path $dir 'config.ovpn'
+          @(
+            'client'
+            'dev tun'
+            'proto tcp-client'
+            'nobind'
+            'persist-key'
+            'persist-tun'
+            'auth-user-pass'
+            'remote-cert-tls server'
+            'redirect-gateway def1 bypass-dhcp'
+            'pull-filter ignore "redirect-gateway ipv6"'
+            'route 10.20.0.0 255.255.0.0'
+            'pull-filter ignore "dhcp-option DNS"'
+            'dhcp-option DNS 10.255.255.2'
+            '<ca>'
+            '-----BEGIN CERTIFICATE-----'
+            'MIIBAAAAAAAAAAAA'
+            '-----END CERTIFICATE-----'
+            '</ca>'
+            'remote 192.0.2.10 443 tcp'
+          ) | Set-Content -Path $config -Encoding ascii
+          $log = Join-Path $dir 'openvpn.log'
+          $ovpnArgs = @('--config', $config, '--management', '127.0.0.1', '0', '--management-query-passwords',
+                    '--management-hold', '--verb', '3', '--dev', 'tun', '--disable-dco',
+                    '--http-proxy', '127.0.0.1', '2080', 'auto', '--redirect-private', 'local')
+          $p = Start-Process -FilePath $exe.FullName -ArgumentList $ovpnArgs -RedirectStandardOutput $log -PassThru -NoNewWindow
+          Start-Sleep -Seconds 8
+          $exited = $p.HasExited
+          if (-not $exited) { Stop-Process -Id $p.Id -Force }
+          $text = Get-Content -Raw -Path $log
+          Write-Output $text
+          if ($text -match 'directive not permitted|Options error|unknown --|Unrecognized option') {
+            throw "The packaged OpenVPN rejected an option (see the log above)."
+          }
+          if ($exited -and $text -notmatch 'MANAGEMENT:') {
+            throw "OpenVPN exited before opening its management interface (see the log above)."
+          }
+          if ($text -notmatch 'MANAGEMENT:') {
+            throw "OpenVPN did not reach its management interface within 8 seconds (see the log above)."
+          }
+          Write-Output "The packaged OpenVPN accepted the proxy and route options."
+
       - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
@@ -191,9 +245,9 @@ jobs:
           retention-days: 30
 
       # A separate configuration (tests on, unsigned, no installer) built after the installer is
-      # uploaded, so a test target that does not build on Windows cannot cost you the installer.
+      # uploaded, so a test target that does not build on Windows cannot cost you the installer. A
+      # failure here still fails the run: do not use an installer from a red run.
       - name: Build and run unit tests
-        continue-on-error: true
         timeout-minutes: 75
         run: |
           python tools/build_all.py --build-app --build-tests

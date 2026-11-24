@@ -786,17 +786,6 @@ void ConnectionManager::onHostnamesResolved()
         return;
     }
 
-    qCInfo(LOG_CONNECTION) << "Connecting to IP:" << currentConnectionDescr_.ip << " protocol:" << currentConnectionDescr_.protocol.toLongString() << " port:" << currentConnectionDescr_.port;
-    if (!lastRequest_.openVpn.amneziawgPreset.isEmpty()) {
-        qCInfo(LOG_CONNECTION) << "Using protocol tweaks, preset:" << lastRequest_.openVpn.amneziawgPreset;
-    }
-    emit protocolPortChanged(currentConnectionDescr_.protocol, currentConnectionDescr_.port);
-
-    if (!dnsConfigurator_->prepare()) {
-        failWithError(ConnectError::kDnsServiceStartFailure);
-        return;
-    }
-
     // Only OpenVPN TCP can be carried through the configured proxy. Anything else would dial the server
     // directly, which is exactly what a user who configured a proxy (often because direct connections
     // are blocked or must not be made) does not want; refuse with a clear error instead. Emergency
@@ -807,6 +796,17 @@ void ConnectionManager::onHostnamesResolved()
                                   << currentConnectionDescr_.protocol.toLongString()
                                   << "- refusing to connect directly; only OpenVPN TCP can use the proxy.";
         failWithError(ConnectError::kProxyRequiresTcp);
+        return;
+    }
+
+    qCInfo(LOG_CONNECTION) << "Connecting to IP:" << currentConnectionDescr_.ip << " protocol:" << currentConnectionDescr_.protocol.toLongString() << " port:" << currentConnectionDescr_.port;
+    if (!lastRequest_.openVpn.amneziawgPreset.isEmpty()) {
+        qCInfo(LOG_CONNECTION) << "Using protocol tweaks, preset:" << lastRequest_.openVpn.amneziawgPreset;
+    }
+    emit protocolPortChanged(currentConnectionDescr_.protocol, currentConnectionDescr_.port);
+
+    if (!dnsConfigurator_->prepare()) {
+        failWithError(ConnectError::kDnsServiceStartFailure);
         return;
     }
 

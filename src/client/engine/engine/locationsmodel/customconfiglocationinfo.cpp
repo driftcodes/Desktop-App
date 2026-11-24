@@ -1,6 +1,7 @@
 #include "customconfiglocationinfo.h"
 
 #include <algorithm>
+#include <QSet>
 #include "engine/customconfigs/ovpncustomconfig.h"
 #include "engine/customconfigs/wireguardcustomconfig.h"
 #include "utils/log/categories.h"
@@ -49,7 +50,21 @@ bool CustomConfigLocationInfo::isExistSelectedNode() const
     }
 }
 
-void CustomConfigLocationInfo::resolveHostnames()
+bool CustomConfigLocationInfo::hasRemoteWithProtocol(const QString &protocol) const
+{
+    auto *config = dynamic_cast<customconfigs::OvpnCustomConfig const *>(config_.data());
+    if (!config) {
+        return false;
+    }
+    for (const auto &remote : config->remotes()) {
+        if (remote.protocol.compare(protocol, Qt::CaseInsensitive) == 0 && !NetworkingValidation::isIpv6(remote.hostname)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void CustomConfigLocationInfo::resolveHostnames(const QString &onlyProtocol)
 {
     if (bAllResolved_)
     {
@@ -57,9 +72,8 @@ void CustomConfigLocationInfo::resolveHostnames()
         return;
     }
 
-    // A resolve is already in flight: a second pass would append duplicate remotes_ entries that
-    // onDnsRequestFinished can never mark resolved (it stops at the first hostname match), so
-    // hostnamesResolved would never fire. The in-flight completion emits for this attempt too.
+    // A resolve is already in flight: a second pass would append duplicate remotes_ entries and
+    // issue duplicate lookups. The in-flight completion emits for this attempt too.
     if (!remotes_.isEmpty())
     {
         return;
@@ -67,7 +81,7 @@ void CustomConfigLocationInfo::resolveHostnames()
 
     switch (config_->type()) {
     case CUSTOM_CONFIG_OPENVPN:
-        resolveHostnamesForOVPNConfig();
+        resolveHostnamesForOVPNConfig(onlyProtocol);
         break;
     case CUSTOM_CONFIG_WIREGUARD:
         resolveHostnamesForWireGuardConfig();
@@ -134,7 +148,7 @@ void CustomConfigLocationInfo::resolveHostnamesForWireGuardConfig()
     }
 }
 
-void CustomConfigLocationInfo::resolveHostnamesForOVPNConfig()
+void CustomConfigLocationInfo::resolveHostnamesForOVPNConfig(const QString &onlyProtocol)
 {
     auto *config = dynamic_cast<customconfigs::OvpnCustomConfig const *>(config_.data());
     if (!config)
@@ -147,9 +161,16 @@ void CustomConfigLocationInfo::resolveHostnamesForOVPNConfig()
     globalProtocol_ = config->globalProtocol();
 
     bool isExistsHostnames = false;
+    QSet<QString> requestedHostnames;
     const QVector<customconfigs::RemoteCommandLine> remotes = config->remotes();
     for (const auto &remote : remotes)
     {
+        // Under a proxy only TCP remotes can be used: the others are not kept, so their hostnames
+        // are never looked up.
+        if (!onlyProtocol.isEmpty() && remote.protocol.compare(onlyProtocol, Qt::CaseInsensitive) != 0)
+        {
+            continue;
+        }
         // IPv6 endpoint connections are not implemented yet (see also onDnsRequestFinished).
         if (NetworkingValidation::isIpv6(remote.hostname))
         {
@@ -183,6 +204,13 @@ void CustomConfigLocationInfo::resolveHostnamesForOVPNConfig()
             remotes_ << rd;
 
             isExistsHostnames = true;
+
+            // One lookup per hostname: its answer resolves every remote that uses it.
+            if (requestedHostnames.contains(remote.hostname))
+            {
+                continue;
+            }
+            requestedHostnames.insert(remote.hostname);
 
             auto callback = [this] (std::uint64_t requestId, const std::string &hostname, std::shared_ptr<WSNetDnsRequestResult> result)
             {
@@ -410,7 +438,9 @@ void CustomConfigLocationInfo::onDnsRequestFinished(const std::string &hostname,
         }
     }
 
-    if (isAllResolved()) {
+    // Emit once, on the answer that completes the set; a late duplicate answer must not start the
+    // attempt's preparation a second time.
+    if (!bAllResolved_ && isAllResolved()) {
         bAllResolved_ = true;
         emit hostnamesResolved();
     }

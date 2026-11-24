@@ -20,4 +20,5 @@ private slots:
     void testSelectNodeWithProtocolSkipsUdpRemotes();
     void testSelectNodeWithProtocolNoMatchKeepsSelection();
     void testSharedHostnameResolvesEveryRemote();
+    void testResolveOnlyProtocolKeepsMatchingRemotes();
 };

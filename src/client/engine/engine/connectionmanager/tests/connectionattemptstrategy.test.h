@@ -41,6 +41,8 @@ private slots:
     void testCustomConfigOvpnDescriptorAndNodeAdvance();
     void testCustomConfigWireGuardDescriptor();
     void testCustomConfigNoUsableRemoteReportsErrorNode();
+    void testCustomConfigUnderProxyKeepsOnlyTcpRemotes();
+    void testCustomConfigUnderProxyWithoutTcpRemoteResolvesNothing();
     void testFactoryAutoAlwaysOnPlusKeepsWireguardWithCachedConfig();
     void testFactoryManualWireguardSubstitutionEmptyPortsGuard();
     void testAutoWalkSkipsEmptyPortsItem();

@@ -32,11 +32,14 @@ void PingManager::updateIps(const QVector<PingIpInfo> &ips)
     // If not disconnected, defer the location update
     if (connectStateController_->currentState() != CONNECT_STATE_DISCONNECTED) {
         pendingIps_ = ips;
+        hasPendingIps_ = true;
         addLog("PingManager::updateIps", "Deferring location update until disconnected");
         return;
     }
 
-    // Process the location update immediately (we're disconnected)
+    // Process the location update immediately (we're disconnected); it supersedes a deferred one.
+    pendingIps_.clear();
+    hasPendingIps_ = false;
     processLocationUpdate(ips);
     onPingTimer();
 }
@@ -73,9 +76,12 @@ void PingManager::onPingTimer()
     }
 
     // Process pending location updates first when disconnected
-    if (!pendingIps_.isEmpty()) {
+    // An empty pending list is a real update too: it removes every target (e.g. a proxy was set
+    // while connected), so the old targets must not be pinged again.
+    if (hasPendingIps_) {
         processLocationUpdate(pendingIps_);
         pendingIps_.clear();
+        hasPendingIps_ = false;
     }
 
     if (ips_.isEmpty())

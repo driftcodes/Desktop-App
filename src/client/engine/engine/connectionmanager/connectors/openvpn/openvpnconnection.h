@@ -154,7 +154,10 @@ private:
     };
 
     StateVariables stateVariables_;
-    bool isRedirectGatewayObserved_;
+    // Every option line the server pushed this session (connection thread only), and whether the
+    // tunnel then carries all IPv4 traffic, published for the engine thread.
+    QStringList pushedOptions_;
+    std::atomic<bool> isFullIpv4Tunnel_{false};
 
     static constexpr int KILL_TIMEOUT = 10000;
     QTimer killControllerTimer_;

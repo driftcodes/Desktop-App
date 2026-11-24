@@ -32,4 +32,5 @@ private:
     const bool tcpOnly_;
 
     void skipToTcpNodeIfRequired();
+    bool hasNoProxyUsableRemote() const;
 };

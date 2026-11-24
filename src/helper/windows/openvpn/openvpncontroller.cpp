@@ -493,6 +493,18 @@ bool OpenVPNController::writeOVPNFile(std::wstring &config, const std::wstring &
         } else if (socksProxy.length() > 0) {
             extraArgs += L" --socks-proxy " + socksProxy + L" " + std::to_wstring(socksPort);
         }
+
+        // Behind a proxy, OpenVPN's "remote" for routing purposes is the proxy address, and
+        // redirect-gateway adds a host route for it via the physical gateway. Windows refuses that
+        // route for a loopback address and OpenVPN reports CONNECTED,ROUTE_ERROR. The "local" flag
+        // skips exactly that host route; it is ORed with the config's and the server's
+        // redirect-gateway flags and enables no redirection itself, so the routing policy is unchanged.
+        // It goes on the command line because the config-file allowlists (ours and the patched
+        // daemon's) do not include redirect-private.
+        const std::wstring &proxyAddress = httpProxy.length() > 0 ? httpProxy : socksProxy;
+        if (proxyAddress.rfind(L"127.", 0) == 0 || proxyAddress == L"::1") {
+            extraArgs += L" --redirect-private local";
+        }
     }
 
     if (config.find(L"remote 127.0.0.1") != std::wstring::npos) {
