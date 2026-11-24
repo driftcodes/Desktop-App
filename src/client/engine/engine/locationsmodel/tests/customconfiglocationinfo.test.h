@@ -19,4 +19,5 @@ private slots:
     void testHostnameMultiIpRotation();
     void testSelectNodeWithProtocolSkipsUdpRemotes();
     void testSelectNodeWithProtocolNoMatchKeepsSelection();
+    void testSharedHostnameResolvesEveryRemote();
 };

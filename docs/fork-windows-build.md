@@ -13,22 +13,49 @@ by Windscribe's own servers.
   connects directly while a proxy is set.
 - **Proxy check.** Before OpenVPN starts, the app checks that the proxy accepts a connection (3 seconds).
   If not, it stops with "Windscribe could not reach the proxy at …" instead of retrying forever.
-- **Proxy on this PC (127.x.x.x).** The app replaces OpenVPN's `redirect-gateway` with the two routes
-  `0.0.0.0/1` and `128.0.0.0/1` into the tunnel, for Windscribe servers and imported profiles. This is
-  the fix you previously added in Advanced Parameters; you can remove these lines from there now:
+- **Proxy on this PC (127.x.x.x).** OpenVPN normally adds a route sending its "remote" through your
+  physical gateway; behind a proxy that remote is 127.0.0.1, which Windows refuses
+  (`CONNECTED,ROUTE_ERROR`). The app adds one line, `redirect-private local`, whose `local` flag makes
+  OpenVPN skip exactly that route. Each profile keeps its own routing: a full-tunnel profile stays full
+  tunnel, and a profile that only routes, say, `10.20.0.0/16` keeps doing only that. This applies to
+  Windscribe servers too, so you can remove the three lines you added to Advanced Parameters (keeping
+  them does no harm):
   ```
   pull-filter ignore redirect-gateway
   route 0.0.0.0 128.0.0.0 vpn_gateway
   route 128.0.0.0 128.0.0.0 vpn_gateway
   ```
-  (If you keep them, the app sees your own `pull-filter` line and leaves the config alone.)
-  A profile containing `route-nopull`, `route-noexec` or its own `pull-filter ignore redirect-gateway`
-  is also left alone.
+- **No direct contact with imported servers before connecting.** While a proxy is set, the app does not
+  look up imported hostnames when it loads the folder, does not ping imported servers to show their
+  latency, and does not add them to the firewall's allowed list. Their latency is therefore not shown.
+  Turning the proxy off restores all three.
 - **`CONNECTED,ROUTE_ERROR`** from OpenVPN now ends the attempt with a clear message instead of an
-  endless "Connecting".
+  endless "Connecting". This applies with the proxy off too (before, the attempt just hung until it
+  timed out, or forever for an imported profile).
+- **Profiles that use one hostname for UDP and TCP** (e.g. `remote vpn.example.com 1194 udp` and
+  `remote vpn.example.com 443 tcp`) no longer hang at "Connecting". This was an existing Windscribe bug.
 - With the proxy off, everything behaves as in the official app.
 
 Emergency Connect is unchanged and never uses the proxy.
+
+### Still direct (not changed yet)
+
+- When you connect to an imported profile whose `remote` is a hostname, the app looks it up with your
+  normal DNS before handing the resulting IP to OpenVPN. Use IP addresses in `remote` lines to avoid
+  this lookup.
+- While connecting and connected, the server's IP is on the firewall's allowed list (as in the official
+  app). That permits traffic to it but does not send any.
+
+### Firewall behaviour
+
+In Automatic mode the firewall only stays on after connecting when the tunnel carries all IPv4 traffic.
+The app now decides this from the profile as a whole: its own `redirect-gateway`, its own `0.0.0.0/1` +
+`128.0.0.0/1` routes, or a server-pushed `redirect-gateway` that the profile does not ignore. Before,
+an imported profile with `pull-filter ignore redirect-gateway` (even with its own full routes), or one
+whose `redirect-gateway` was in the file rather than pushed by the server, made Automatic / Before
+Connection switch the firewall off once connected. A profile that really only routes some networks
+still switches it off, because blocking everything else would cut your internet. **Always On** never
+switches the firewall off.
 
 ## Building with GitHub Actions
 

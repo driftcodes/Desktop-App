@@ -3139,6 +3139,12 @@ void Engine::updateProxySettings()
         firewallExceptions_.setProxyIP(proxySettings);
         updateFirewallSettings();
     }
+    // With a proxy set, imported VPN endpoints are reached only through it: no direct DNS lookups,
+    // pings or firewall exceptions for them before connecting.
+    if (locationsModel_) {
+        locationsModel_->setCustomConfigDirectProbesAllowed(
+            !ProxyServerController::instance().getCurrentProxySettings().isProxyEnabled());
+    }
 }
 
 #ifdef Q_OS_WIN

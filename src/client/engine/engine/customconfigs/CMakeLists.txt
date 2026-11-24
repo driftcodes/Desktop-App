@@ -10,6 +10,8 @@ target_sources(engine PRIVATE
     ovpncredentialinliner.h
     ovpncustomconfig.cpp
     ovpncustomconfig.h
+    ovpnroutingpolicy.cpp
+    ovpnroutingpolicy.h
     parseovpnconfigline.cpp
     parseovpnconfigline.h
     wireguardcustomconfig.cpp

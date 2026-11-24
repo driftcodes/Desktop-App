@@ -67,7 +67,7 @@ OpenVPNConnection::~OpenVPNConnection()
 
 void OpenVPNConnection::prepareImpl()
 {
-    isRouteFixApplied_ = false;
+    routingPolicy_ = customconfigs::OvpnRoutingPolicy();
     if (descr_.connectionNodeType == CONNECTION_NODE_CUSTOM_CONFIG) {
         isCustomConfig_ = true;
         // Credentials for custom configs arrive through the user-input path when OpenVPN asks for them.
@@ -78,8 +78,9 @@ void OpenVPNConnection::prepareImpl()
         if (!env_.primaryDnsServer.isEmpty()) {
             MakeOVPNFile::appendDnsOverride(config_, env_.primaryDnsServer);
         }
+        routingPolicy_ = customconfigs::analyzeOvpnRouting(config_);
         if (isProxyForwarded() && isLoopbackProxy()) {
-            isRouteFixApplied_ = MakeOVPNFile::applyLoopbackProxyRouteFix(config_);
+            MakeOVPNFile::addLoopbackProxyRouteFix(config_);
         }
         finishPrepare();
         return;
@@ -135,8 +136,9 @@ void OpenVPNConnection::prepareImpl()
         return;
     }
     config_ = makeOVPNFile.config();
+    routingPolicy_ = customconfigs::analyzeOvpnRouting(config_);
     if (isProxyForwarded() && isLoopbackProxy()) {
-        isRouteFixApplied_ = MakeOVPNFile::applyLoopbackProxyRouteFix(config_);
+        MakeOVPNFile::addLoopbackProxyRouteFix(config_);
     }
 
     if (descr_.protocol == types::Protocol::STUNNEL) {
@@ -297,7 +299,9 @@ bool OpenVPNConnection::isDisconnected() const
 
 bool OpenVPNConnection::isAllowFirewallAfterConnectionRuntime() const
 {
-    return isRedirectGatewayObserved_ || isRouteFixApplied_;
+    // The config's own redirect-gateway or 0.0.0.0/1 + 128.0.0.0/1 routes count as well as a pushed
+    // redirect-gateway, unless the config drops the push (route-nopull / pull-filter) or runs no routes.
+    return routingPolicy_.sendsAllIpv4ThroughTunnel(isRedirectGatewayObserved_);
 }
 
 void OpenVPNConnection::continueWithUserInput(const UserInputResponse &response)

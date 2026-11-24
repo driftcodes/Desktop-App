@@ -1,5 +1,6 @@
 #include "customconfiglocationinfo.test.h"
 
+#include <QSignalSpy>
 #include <QtTest>
 
 #include "engine/customconfigs/wireguardcustomconfig.h"
@@ -18,6 +19,18 @@ class V6EndpointWireguardConfig : public customconfigs::WireguardCustomConfig
 {
 public:
     QStringList hostnames() const override { return QStringList() << "2001:db8::1"; }
+};
+
+class FakeDnsResult : public wsnet::WSNetDnsRequestResult
+{
+public:
+    explicit FakeDnsResult(std::vector<std::string> ips) : ips_(std::move(ips)) {}
+    std::vector<std::string> ips() const override { return ips_; }
+    std::uint32_t elapsedMs() const override { return 0; }
+    std::shared_ptr<wsnet::WSNetRequestError> error() const override { return nullptr; }
+
+private:
+    std::vector<std::string> ips_;
 };
 
 } // namespace
@@ -215,6 +228,37 @@ void TestCustomConfigLocationInfo::testSelectNodeWithProtocolNoMatchKeepsSelecti
     QVERIFY(!info->selectNodeWithProtocol("tcp"));
     QCOMPARE(info->getSelectedIp(), QString("9.8.7.6"));
     QCOMPARE(info->getSelectedProtocol(), QString("udp"));
+}
+
+void TestCustomConfigLocationInfo::testSharedHostnameResolvesEveryRemote()
+{
+    // A common provider layout: one hostname, a UDP and a TCP remote. Seeded as resolveHostnames()
+    // leaves it while the lookups are in flight.
+    auto info = makeOvpnCustomConfigLocationInfo("dev tun\nauth-user-pass\nremote vpn.example.com 1194 udp\n");
+    QVERIFY(info);
+    auto unresolvedRemote = [](const QString &hostname, uint port, const QString &protocol) {
+        locationsmodel::CustomConfigLocationInfo::RemoteDescr rd;
+        rd.ipOrHostname_ = hostname;
+        rd.isHostname = true;
+        rd.isResolved = false;
+        rd.remoteCmdLine = QString("remote %1 %2 %3").arg(hostname).arg(port).arg(protocol);
+        rd.port = port;
+        rd.protocol = protocol;
+        return rd;
+    };
+    info->remotes_ << unresolvedRemote("vpn.example.com", 1194, "udp") << unresolvedRemote("vpn.example.com", 443, "tcp");
+    QSignalSpy resolvedSpy(info.data(), &locationsmodel::CustomConfigLocationInfo::hostnamesResolved);
+
+    info->onDnsRequestFinished("vpn.example.com", std::make_shared<FakeDnsResult>(std::vector<std::string>{"5.6.7.8"}));
+
+    // One answer resolves both remotes, so the attempt can proceed (it used to hang here).
+    QCOMPARE(resolvedSpy.count(), 1);
+    QVERIFY(info->remotes_[0].isResolved);
+    QVERIFY(info->remotes_[1].isResolved);
+    QCOMPARE(info->remotes_[1].ipsForHostname_, QStringList() << "5.6.7.8");
+    QVERIFY(info->selectNodeWithProtocol("tcp"));
+    QCOMPARE(info->getSelectedPort(), 443u);
+    QVERIFY(info->getOvpnConfigForSelectedEndpoint().endsWith("remote 5.6.7.8 443 tcp\r\n"));
 }
 
 QTEST_MAIN(TestCustomConfigLocationInfo)

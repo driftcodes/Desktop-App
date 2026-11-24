@@ -92,7 +92,9 @@ jobs:
           git -C $registry fetch -q --depth 1 https://github.com/Windscribe/ws-vcpkg-registry.git $baseline
           git -C $registry checkout -q FETCH_HEAD
           New-Item -ItemType Directory -Force -Path C:\vcpkg-bincache | Out-Null
-          cmd /c "`"$registry\install-vcpkg\vcpkg_install.bat`" $env:VCPKG_ROOT"
+          # The script changes into VCPKG_ROOT with a plain "cd", which does not switch drives. The
+          # checkout is on D:, so start on C: (where VCPKG_ROOT is) or it clones into the checkout.
+          cmd /c "cd /d C:\ && `"$registry\install-vcpkg\vcpkg_install.bat`" $env:VCPKG_ROOT"
           if ($LASTEXITCODE -ne 0) { throw "vcpkg installation failed" }
           if (-not (Test-Path "$env:VCPKG_ROOT\vcpkg.exe")) { throw "vcpkg.exe missing after installation" }
 
@@ -134,7 +136,7 @@ jobs:
           "WS_SIGNING_CERT_SUBJECT=$subject" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Build app and installer
-        timeout-minutes: 300
+        timeout-minutes: 270
         env:
           WS_SIGNING_PFX_PASSWORD: ${{ secrets.WINDOWS_SIGNING_PFX_PASSWORD }}
         run: |
@@ -145,8 +147,19 @@ jobs:
           }
           if ($LASTEXITCODE -ne 0) { throw "build_all failed" }
 
-      - name: Save vcpkg binary cache
+      - name: Check vcpkg binary cache contents
+        id: bincache
         if: always()
+        shell: pwsh
+        run: |
+          $count = @(Get-ChildItem -Path C:\vcpkg-bincache -Recurse -File -ErrorAction SilentlyContinue).Count
+          Write-Output "vcpkg binary cache holds $count file(s)"
+          "has_files=$($count -gt 0)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      # Saved even when the build fails, so a rerun continues from the packages built so far. An
+      # empty cache is not saved: it would become the newest entry and hide a useful older one.
+      - name: Save vcpkg binary cache
+        if: always() && steps.bincache.outputs.has_files == 'True'
         uses: actions/cache/save@v4
         with:
           path: C:\vcpkg-bincache
@@ -176,6 +189,17 @@ jobs:
           path: build/src/installer/gui/windows/installer/installer.exe
           if-no-files-found: error
           retention-days: 30
+
+      # A separate configuration (tests on, unsigned, no installer) built after the installer is
+      # uploaded, so a test target that does not build on Windows cannot cost you the installer.
+      - name: Build and run unit tests
+        continue-on-error: true
+        timeout-minutes: 75
+        run: |
+          python tools/build_all.py --build-app --build-tests
+          if ($LASTEXITCODE -ne 0) { throw "test build failed" }
+          ctest --test-dir build --output-on-failure -R "^(connectionmanager|connectionattemptstrategy|emergencyconnectionattemptstrategy|openvpnconnection|wireguardconnection|ikev2connection|customconfiglocationinfo|parseovpnconfigline|ovpncredentialinliner|wireguardcustomconfig|ovpndirectivewhitelist)$"
+          if ($LASTEXITCODE -ne 0) { throw "unit tests failed" }
 
       - name: Remove signing certificate
         if: always()

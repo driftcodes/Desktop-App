@@ -2,6 +2,7 @@
 #include "utils/log/categories.h"
 #include "utils/log/clean_sensitive_info.h"
 #include "ovpncredentialinliner.h"
+#include "ovpnroutingpolicy.h"
 #include "parseovpnconfigline.h"
 
 #include <QFileInfo>
@@ -152,10 +153,18 @@ void OvpnCustomConfig::process()
                 globalPort_ = openVpnLine.port;
                 qDebug(LOG_CUSTOM_OVPN) << "Extracted global port:" << globalPort_;
             } else if (openVpnLine.type == ParseOvpnConfigLine::OVPN_CMD_IGNORE_REDIRECT_GATEWAY) {
-                isAllowFirewallAfterConnection_ = false;
                 qDebug(LOG_CUSTOM_OVPN) << "Extracted information: ignore redirect-gateway (" << line << ")";
             }
             ovpnData_ += line + "\n";
+        }
+
+        // The automatic "after connection" firewall needs a tunnel that carries all IPv4 traffic. A
+        // config that ignores the pushed redirect-gateway can still do that with its own redirect or
+        // 0.0.0.0/1 + 128.0.0.0/1 routes, so judge the config as a whole rather than one directive.
+        // The final decision is made after connecting, when the server's push is known.
+        isAllowFirewallAfterConnection_ = analyzeOvpnRouting(ovpnData_).mayRedirectAllIpv4();
+        if (!isAllowFirewallAfterConnection_) {
+            qDebug(LOG_CUSTOM_OVPN) << "This config cannot route all IPv4 traffic through the tunnel";
         }
 
         // Fix protocol in remotes.

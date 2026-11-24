@@ -365,6 +365,10 @@ QString CustomConfigLocationInfo::getLogString() const
 void CustomConfigLocationInfo::onDnsRequestFinished(const std::string &hostname, std::shared_ptr<WSNetDnsRequestResult> result)
 {
     const QString qHostname = QString::fromStdString(hostname);
+    // Several remote lines can share a hostname (e.g. "remote vpn.example.com 1194 udp" and
+    // "remote vpn.example.com 443 tcp"); every one of them takes this answer. Stopping at the first
+    // match left the others unresolved, so hostnamesResolved() was never emitted and the connect hung.
+    bool logged = false;
     for (int i = 0; i < remotes_.count(); ++i) {
         if (remotes_[i].isHostname && remotes_[i].ipOrHostname_ == qHostname) {
             // We requested kBoth so we can detect v6-only / dual-stack cases explicitly. The
@@ -383,6 +387,11 @@ void CustomConfigLocationInfo::onDnsRequestFinished(const std::string &hostname,
                 }
             }
             remotes_[i].ipsForHostname_ = ipv4List;
+            remotes_[i].isResolved = true;
+            if (logged) {
+                continue;
+            }
+            logged = true;
 
             if (!ipv4List.isEmpty()) {
                 qCInfo(LOG_CONNECTION) << "Hostname:" << qHostname << "resolved (IPv4) ->" << ipv4List.join("; ");
@@ -398,8 +407,6 @@ void CustomConfigLocationInfo::onDnsRequestFinished(const std::string &hostname,
             } else {
                 qCWarning(LOG_CONNECTION) << "Hostname:" << qHostname << "did not resolve to any IP";
             }
-            remotes_[i].isResolved = true;
-            break;
         }
     }
 

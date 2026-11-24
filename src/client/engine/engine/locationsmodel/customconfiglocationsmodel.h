@@ -24,6 +24,10 @@ public:
 
     void setCustomConfigs(const QVector<QSharedPointer<const customconfigs::ICustomConfig>> &customConfigs);
     void clear();
+    // False while a proxy is set. Imported endpoints are then reached only through the proxy, so the
+    // model does not resolve their hostnames, ping them or add them to the firewall exceptions: each
+    // of those would contact the endpoint (or a resolver) directly over the physical connection.
+    void setDirectProbesAllowed(bool allowed);
 
     QSharedPointer<BaseLocationInfo> getMutableLocationInfoById(const LocationID &locationId);
 
@@ -67,6 +71,8 @@ private:
     };
 
     QVector<CustomConfigWithPingInfo> pingInfos_;
+    QVector<QSharedPointer<const customconfigs::ICustomConfig>> customConfigs_;
+    bool directProbesAllowed_ = true;
 
 
     bool isAllResolved() const;

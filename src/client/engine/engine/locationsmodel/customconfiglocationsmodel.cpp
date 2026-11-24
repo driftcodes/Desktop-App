@@ -26,6 +26,7 @@ void CustomConfigLocationsModel::setCustomConfigs(const QVector<QSharedPointer<c
     // todo: check if configs actually changed
     // todo: dns-resolver cache
 
+    customConfigs_ = customConfigs;
     QStringList hostnamesForResolve;
     // fill pingInfos_ array
     pingInfos_.clear();
@@ -69,6 +70,13 @@ void CustomConfigLocationsModel::setCustomConfigs(const QVector<QSharedPointer<c
 
     generateLocationsUpdated();
 
+    if (!directProbesAllowed_) {
+        qCInfo(LOG_BASIC) << "A proxy is set: not resolving, pinging or whitelisting custom config endpoints";
+        pingManager_.clearIps();
+        emit whitelistIpsChanged(QStringList());
+        return;
+    }
+
     auto callback = [this] (std::uint64_t requestId, const std::string &hostname, std::shared_ptr<WSNetDnsRequestResult> result)
     {
         QMetaObject::invokeMethod(this, [this, hostname, result] { // NOLINT: false positive for memory leak
@@ -93,8 +101,24 @@ void CustomConfigLocationsModel::setCustomConfigs(const QVector<QSharedPointer<c
     }
 }
 
+void CustomConfigLocationsModel::setDirectProbesAllowed(bool allowed)
+{
+    if (directProbesAllowed_ == allowed) {
+        return;
+    }
+    directProbesAllowed_ = allowed;
+    if (!allowed) {
+        pingManager_.clearIps();
+        emit whitelistIpsChanged(QStringList());
+    } else if (!customConfigs_.isEmpty()) {
+        // Resolve, ping and whitelist again now that direct traffic to the endpoints is expected.
+        setCustomConfigs(customConfigs_);
+    }
+}
+
 void CustomConfigLocationsModel::clear()
 {
+    customConfigs_.clear();
     pingInfos_.clear();
     pingManager_.clearIps();
     QSharedPointer<types::Location> empty(new types::Location());
@@ -199,6 +223,11 @@ bool CustomConfigLocationsModel::isAllResolved() const
 
 void CustomConfigLocationsModel::startPingAndWhitelistIps()
 {
+    // A lookup answered after a proxy was set must not start direct pings.
+    if (!directProbesAllowed_) {
+        return;
+    }
+
     QVector<PingIpInfo> allIps;
     QStringList strListIps;
 

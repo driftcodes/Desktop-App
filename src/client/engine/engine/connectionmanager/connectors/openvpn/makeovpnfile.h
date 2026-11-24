@@ -16,15 +16,14 @@ public:
     // Shared with the custom-config prepare path so the two DNS-override copies can't drift.
     static void appendDnsOverride(QString &config, const QString &dnsServer);
 
-    // For a proxy on this machine (127.x / ::1). OpenVPN's redirect-gateway adds a host route that
-    // sends the "remote" (which, behind an HTTP/SOCKS proxy, is the proxy address) via the physical
-    // gateway; Windows refuses that route for a loopback address and OpenVPN reports
-    // CONNECTED,ROUTE_ERROR. This replaces redirect-gateway with the two /1 routes it would have added,
-    // without the host route: ignores a pushed redirect-gateway, drops one written in the config, and
-    // routes 0.0.0.0/1 and 128.0.0.0/1 into the tunnel. A config that opts out of default-gateway
-    // redirection (route-nopull, route-noexec or its own "pull-filter ignore redirect-gateway") is left
-    // untouched, since OpenVPN then adds no host route either. Returns true when the config was changed.
-    static bool applyLoopbackProxyRouteFix(QString &config);
+    // For a proxy on this machine (127.x / ::1). When redirect-gateway is in effect, OpenVPN adds a
+    // host route sending its "remote" via the physical gateway; behind a proxy that remote is the
+    // proxy address, and Windows refuses such a route for a loopback address (CONNECTED,ROUTE_ERROR).
+    // Appends "redirect-private local", whose "local" flag makes OpenVPN skip exactly that host route
+    // whether redirect-gateway comes from the config or from the server's push. It enables no
+    // redirection by itself, so the config's routing policy is otherwise unchanged. "autolocal" is
+    // dropped from the config's own redirect-gateway lines, since it can re-enable the host route.
+    static void addLoopbackProxyRouteFix(QString &config);
 
 private:
     QString config_;

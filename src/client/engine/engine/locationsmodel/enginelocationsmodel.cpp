@@ -35,6 +35,11 @@ void LocationsModel::setCustomConfigLocations(const QVector<QSharedPointer<const
     customConfigLocationsModel_->setCustomConfigs(customConfigs);
 }
 
+void LocationsModel::setCustomConfigDirectProbesAllowed(bool allowed)
+{
+    customConfigLocationsModel_->setDirectProbesAllowed(allowed);
+}
+
 void LocationsModel::clear()
 {
     apiLocationsModel_->clear();

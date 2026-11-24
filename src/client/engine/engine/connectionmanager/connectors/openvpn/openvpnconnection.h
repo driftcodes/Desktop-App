@@ -12,6 +12,7 @@
 #include "engine/connectionmanager/connectors/openvpn/openvpnsessionparams.h"
 #include "engine/connectionmanager/connectors/openvpn/stunnelmanager.h"
 #include "engine/connectionmanager/connectors/openvpn/wstunnelmanager.h"
+#include "engine/customconfigs/ovpnroutingpolicy.h"
 #include "engine/helper/helper.h"
 #include "types/protocol.h"
 #include "utils/boost_includes.h"
@@ -94,9 +95,9 @@ private:
     static constexpr int kProxyProbeTimeoutMs = 3000;
     QPointer<QTcpSocket> proxyProbeSocket_;
     QTimer proxyProbeTimer_;
-    // The loopback-proxy route fix replaced redirect-gateway with full-tunnel routes, so the default
-    // gateway is redirected even when the server's push no longer shows it.
-    bool isRouteFixApplied_ = false;
+    // What the final config itself says about default-gateway redirection; combined with the server's
+    // push to decide whether the tunnel carries all IPv4 traffic (automatic firewall).
+    customconfigs::OvpnRoutingPolicy routingPolicy_;
     QString takeConnectErrorDetail() override;
 
 #ifdef Q_OS_WIN
