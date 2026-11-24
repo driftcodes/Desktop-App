@@ -713,4 +713,34 @@ inline bool filterConfig(const std::string &config, std::string &out)
     return true;
 }
 
+// Whether the config dials a local wrapper (stunnel/wstunnel): an actual "remote 127.0.0.1" directive,
+// not the text anywhere (a comment, or "remote 127.0.0.10"). Run on the filtered config, which is
+// what OpenVPN reads. The Windows helper then routes all IPv4 into the tunnel; the client's firewall
+// decision (OvpnRoutingPolicy) applies the same rule.
+inline bool hasLoopbackWrapperRemote(const std::string &config)
+{
+    std::istringstream stream(config);
+    std::string line;
+    while (std::getline(stream, line)) {
+        std::istringstream words(line);
+        std::string directive;
+        std::string host;
+        if (!(words >> directive)) {
+            continue;
+        }
+        if (directive.rfind("--", 0) == 0) {
+            directive.erase(0, 2);
+        }
+        if (directive != "remote" || !(words >> host)) {
+            continue;
+        }
+        host.erase(std::remove(host.begin(), host.end(), '"'), host.end());
+        host.erase(std::remove(host.begin(), host.end(), '\''), host.end());
+        if (host == "127.0.0.1") {
+            return true;
+        }
+    }
+    return false;
+}
+
 } // namespace OvpnDirectiveWhitelist

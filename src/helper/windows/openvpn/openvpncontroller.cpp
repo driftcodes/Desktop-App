@@ -507,7 +507,9 @@ bool OpenVPNController::writeOVPNFile(std::wstring &config, const std::wstring &
         }
     }
 
-    if (config.find(L"remote 127.0.0.1") != std::wstring::npos) {
+    // Only an actual "remote 127.0.0.1" directive in what OpenVPN reads, not the text anywhere (a
+    // comment in an imported profile must not change its routing).
+    if (OvpnDirectiveWhitelist::hasLoopbackWrapperRemote(filtered)) {
         extraArgs += L" --pull-filter ignore redirect-gateway"
                      L" --route 0.0.0.0 128.0.0.0 vpn_gateway"
                      L" --route 128.0.0.0 128.0.0.0 vpn_gateway";

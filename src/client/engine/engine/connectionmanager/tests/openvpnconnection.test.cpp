@@ -661,6 +661,40 @@ void TestOpenVPNConnection::testFirewallAfterConnectionFollowsConfigRouting()
     QVERIFY(!analyzeOvpnRouting("redirect-private local\n").sendsAllIpv4ThroughTunnel(noPush));
     QVERIFY(!analyzeOvpnRouting("client\n").sendsAllIpv4ThroughTunnel({"redirect-private local"}));
 
+    // Routes through the negotiated tunnel gateway (route-gateway) count like vpn_gateway.
+    const QString ignoreRedirect = "pull-filter ignore redirect-gateway\n";
+    QVERIFY(analyzeOvpnRouting(ignoreRedirect)
+                .sendsAllIpv4ThroughTunnel({"route-gateway 10.8.0.1", "route 0.0.0.0 128.0.0.0 10.8.0.1",
+                                            "route 128.0.0.0 128.0.0.0 10.8.0.1"}));
+    // ...and through an address on the tunnel's own subnet (topology subnet).
+    QVERIFY(analyzeOvpnRouting(ignoreRedirect)
+                .sendsAllIpv4ThroughTunnel({"topology subnet", "ifconfig 10.8.0.6 255.255.255.0",
+                                            "route 0.0.0.0 128.0.0.0 10.8.0.1", "route 128.0.0.0 128.0.0.0 10.8.0.1"}));
+    // ...and through the net30 peer when no route-gateway is pushed.
+    QVERIFY(analyzeOvpnRouting(ignoreRedirect)
+                .sendsAllIpv4ThroughTunnel({"topology net30", "ifconfig 10.8.0.6 10.8.0.5",
+                                            "route 0.0.0.0 128.0.0.0 10.8.0.5", "route 128.0.0.0 128.0.0.0 10.8.0.5"}));
+    // A gateway outside the tunnel (the LAN router) is not the tunnel.
+    QVERIFY(!analyzeOvpnRouting(ignoreRedirect)
+                 .sendsAllIpv4ThroughTunnel({"route-gateway 10.8.0.1", "route 0.0.0.0 128.0.0.0 192.168.1.1",
+                                             "route 128.0.0.0 128.0.0.0 192.168.1.1"}));
+    // Coverage is computed over the address space, whatever the split.
+    QVERIFY(analyzeOvpnRouting("route 0.0.0.0 192.0.0.0\nroute 64.0.0.0 192.0.0.0\nroute 128.0.0.0 192.0.0.0 vpn_gateway\n"
+                               "route 192.0.0.0 192.0.0.0 default\n").sendsAllIpv4ThroughTunnel(noPush));
+    QVERIFY(!analyzeOvpnRouting("route 0.0.0.0 192.0.0.0\nroute 64.0.0.0 192.0.0.0\nroute 192.0.0.0 192.0.0.0\n")
+                 .sendsAllIpv4ThroughTunnel(noPush));
+    QVERIFY(analyzeOvpnRouting("route 0.0.0.0 0.0.0.0\n").sendsAllIpv4ThroughTunnel(noPush));
+    // A non-contiguous netmask is not a route OpenVPN would install as such.
+    QVERIFY(!analyzeOvpnRouting("route 0.0.0.0 128.0.0.0\nroute 128.0.0.0 255.0.255.0\n").sendsAllIpv4ThroughTunnel(noPush));
+
+    // Only an actual "remote 127.0.0.1" directive marks a local-wrapper config, not a comment.
+    QVERIFY(customconfigs::hasLoopbackWrapperRemote("client\nremote 127.0.0.1\nport 1194\n"));
+    QVERIFY(!customconfigs::hasLoopbackWrapperRemote("# via remote 127.0.0.1\nremote 5.6.7.8 443\n"));
+    QVERIFY(!customconfigs::hasLoopbackWrapperRemote("remote 5.6.7.8 443 # not remote 127.0.0.1\n"));
+    QVERIFY(!customconfigs::hasLoopbackWrapperRemote("remote 127.0.0.10 443\n"));
+    QVERIFY(!analyzeOvpnRouting("# remote 127.0.0.1\nroute 10.20.0.0 255.255.0.0\nremote 5.6.7.8 443\n")
+                 .sendsAllIpv4ThroughTunnel(noPush));
+
     // Tokenizer: quotes group, escapes, comments.
     QCOMPARE(customconfigs::tokenizeOvpnLine("pull-filter ignore \"redirect-gateway ipv6\" # note"),
              QStringList({"pull-filter", "ignore", "redirect-gateway ipv6"}));

@@ -1,5 +1,9 @@
 #include "ovpnroutingpolicy.h"
 
+#include <QtGlobal>
+#include <algorithm>
+#include <utility>
+
 namespace customconfigs {
 
 namespace {
@@ -17,41 +21,59 @@ QString directiveName(const QStringList &tokens)
     return name;
 }
 
-// A "route" that sends traffic into the tunnel: no gateway given, "default" (which OpenVPN treats as
-// not given, i.e. the VPN gateway), or vpn_gateway.
-bool isTunnelRoute(const QStringList &tokens, const QString &network, const QString &netmask)
-{
-    if (tokens.size() < 3 || tokens[1] != network || tokens[2] != netmask) {
-        return false;
-    }
-    return tokens.size() == 3 || tokens[3] == "vpn_gateway" || tokens[3] == "default";
-}
-
-// Applies one redirect-gateway / redirect-private / route option to the running IPv4 state, the way
-// OpenVPN's add_option() does.
-void applyRoutingOption(const QStringList &tokens, bool &redirectIpv4, bool &lowerHalf, bool &upperHalf)
-{
-    const QString name = directiveName(tokens);
-    if (name == "redirect-gateway" || name == "redirect-private") {
-        if (tokens.contains("!ipv4")) {
-            redirectIpv4 = false;
-        } else if (name == "redirect-gateway") {
-            redirectIpv4 = true;
-        }
-    } else if (name == "route") {
-        if (isTunnelRoute(tokens, "0.0.0.0", "0.0.0.0")) {
-            lowerHalf = upperHalf = true;
-        } else if (isTunnelRoute(tokens, "0.0.0.0", "128.0.0.0")) {
-            lowerHalf = true;
-        } else if (isTunnelRoute(tokens, "128.0.0.0", "128.0.0.0")) {
-            upperHalf = true;
-        }
-    }
-}
-
 bool isRouteOption(const QString &name)
 {
     return name == "redirect-gateway" || name == "redirect-private" || name == "route";
+}
+
+// Applies one redirect-gateway / redirect-private option the way OpenVPN's add_option() does.
+void applyRedirectOption(const QStringList &tokens, bool &redirectIpv4)
+{
+    const QString name = directiveName(tokens);
+    if (tokens.contains("!ipv4")) {
+        redirectIpv4 = false;
+    } else if (name == "redirect-gateway") {
+        redirectIpv4 = true;
+    }
+}
+
+OvpnRoute routeFromTokens(const QStringList &tokens)
+{
+    return OvpnRoute{tokens.value(1), tokens.value(2), tokens.value(3)};
+}
+
+bool parseIpv4(const QString &text, quint32 &out)
+{
+    const QStringList parts = text.split('.');
+    if (parts.size() != 4) {
+        return false;
+    }
+    quint32 value = 0;
+    for (const QString &part : parts) {
+        bool ok = false;
+        const uint octet = part.toUInt(&ok);
+        if (!ok || octet > 255 || part.isEmpty()) {
+            return false;
+        }
+        value = (value << 8) | octet;
+    }
+    out = value;
+    return true;
+}
+
+// A netmask: contiguous ones from the top.
+bool parseNetmask(const QString &text, quint32 &out)
+{
+    quint32 mask = 0;
+    if (!parseIpv4(text, mask)) {
+        return false;
+    }
+    const quint32 inverted = ~mask;
+    if ((inverted & (inverted + 1)) != 0) {
+        return false;
+    }
+    out = mask;
+    return true;
 }
 
 } // namespace
@@ -100,6 +122,18 @@ QStringList tokenizeOvpnLine(const QString &line)
     return tokens;
 }
 
+bool hasLoopbackWrapperRemote(const QString &config)
+{
+    const QStringList lines = config.split('\n');
+    for (const QString &line : lines) {
+        const QStringList tokens = tokenizeOvpnLine(line);
+        if (directiveName(tokens) == "remote" && tokens.value(1) == "127.0.0.1") {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool OvpnRoutingPolicy::isPushedOptionAccepted(const QString &option) const
 {
     if (routeNopull && isRouteOption(directiveName(tokenizeOvpnLine(option)))) {
@@ -116,17 +150,94 @@ bool OvpnRoutingPolicy::isPushedOptionAccepted(const QString &option) const
 bool OvpnRoutingPolicy::sendsAllIpv4ThroughTunnel(const QStringList &pushedOptions) const
 {
     bool redirectIpv4 = redirectsIpv4Locally;
-    bool lowerHalf = hasLowerHalfRoute;
-    bool upperHalf = hasUpperHalfRoute;
+    QVector<OvpnRoute> allRoutes = routes;
+    QStringList ifconfigArgs = ifconfig;
+    QString topologyName = topology;
+    QString routeGateway;  // route-gateway in a config file is stripped by the helper; only a push sets it
+
     for (const QString &rawOption : pushedOptions) {
         const QString option = rawOption.trimmed();
         const QStringList tokens = tokenizeOvpnLine(option);
-        if (!isRouteOption(directiveName(tokens)) || !isPushedOptionAccepted(option)) {
+        const QString name = directiveName(tokens);
+        if (name.isEmpty() || !isPushedOptionAccepted(option)) {
             continue;
         }
-        applyRoutingOption(tokens, redirectIpv4, lowerHalf, upperHalf);
+        if (name == "redirect-gateway" || name == "redirect-private") {
+            applyRedirectOption(tokens, redirectIpv4);
+        } else if (name == "route") {
+            allRoutes << routeFromTokens(tokens);
+        } else if (name == "route-gateway") {
+            routeGateway = tokens.value(1);
+        } else if (name == "ifconfig") {
+            ifconfigArgs = tokens.mid(1);
+        } else if (name == "topology") {
+            topologyName = tokens.value(1);
+        }
     }
-    return redirectIpv4 || (lowerHalf && upperHalf);
+
+    if (redirectIpv4) {
+        return true;
+    }
+
+    // The VPN gateway (OpenVPN's remote_endpoint) and the tunnel's own subnet.
+    quint32 endpoint = 0;
+    bool hasEndpoint = parseIpv4(routeGateway, endpoint);
+    quint32 subnetMask = 0;
+    quint32 subnetNetwork = 0;
+    bool hasSubnet = false;
+    quint32 local = 0;
+    if (ifconfigArgs.size() >= 2 && parseIpv4(ifconfigArgs[0], local)) {
+        quint32 mask = 0;
+        const bool secondIsNetmask = topologyName == "subnet" ||
+            (topologyName.isEmpty() && parseNetmask(ifconfigArgs[1], mask) && (mask >> 24) == 0xFF);
+        if (secondIsNetmask) {
+            if (parseNetmask(ifconfigArgs[1], mask)) {
+                subnetMask = mask;
+                subnetNetwork = local & mask;
+                hasSubnet = true;
+            }
+        } else if (!hasEndpoint) {
+            hasEndpoint = parseIpv4(ifconfigArgs[1], endpoint);
+        }
+    }
+
+    auto isTunnelGateway = [&](const QString &gateway) {
+        if (gateway.isEmpty() || gateway == "default" || gateway == "vpn_gateway") {
+            return true;
+        }
+        quint32 address = 0;
+        if (!parseIpv4(gateway, address)) {
+            return false;  // net_gateway, remote_host or a hostname
+        }
+        return (hasEndpoint && address == endpoint) || (hasSubnet && (address & subnetMask) == subnetNetwork);
+    };
+
+    // Whether the routes through the tunnel cover all of 0.0.0.0-255.255.255.255.
+    QVector<std::pair<quint64, quint64>> ranges;
+    for (const OvpnRoute &route : std::as_const(allRoutes)) {
+        if (!isTunnelGateway(route.gateway)) {
+            continue;
+        }
+        quint32 network = 0;
+        quint32 mask = 0xFFFFFFFF;
+        if (!parseIpv4(route.network, network)) {
+            continue;
+        }
+        if (!route.netmask.isEmpty() && route.netmask != "default" && !parseNetmask(route.netmask, mask)) {
+            continue;
+        }
+        const quint64 first = network & mask;
+        ranges.append({first, first + static_cast<quint64>(~mask)});
+    }
+    std::sort(ranges.begin(), ranges.end());
+    quint64 nextUncovered = 0;
+    for (const auto &range : std::as_const(ranges)) {
+        if (range.first > nextUncovered) {
+            return false;
+        }
+        nextUncovered = std::max(nextUncovered, range.second + 1);
+    }
+    return nextUncovered > 0xFFFFFFFFull;
 }
 
 OvpnRoutingPolicy analyzeOvpnRouting(const QString &config)
@@ -151,13 +262,17 @@ OvpnRoutingPolicy analyzeOvpnRouting(const QString &config)
 
         const QStringList tokens = tokenizeOvpnLine(trimmed);
         const QString name = directiveName(tokens);
-        if (name.isEmpty()) {
-            continue;
-        }
         // Only directives that reach the daemon count. The helper strips the ones not on its allowlist,
-        // among them route-noexec and redirect-private (the patched daemon would reject them anyway).
-        if (name == "redirect-gateway" || name == "route") {
-            applyRoutingOption(tokens, policy.redirectsIpv4Locally, policy.hasLowerHalfRoute, policy.hasUpperHalfRoute);
+        // among them route-noexec, route-gateway and redirect-private (the patched daemon would reject
+        // them anyway).
+        if (name == "redirect-gateway") {
+            applyRedirectOption(tokens, policy.redirectsIpv4Locally);
+        } else if (name == "route") {
+            policy.routes << routeFromTokens(tokens);
+        } else if (name == "ifconfig") {
+            policy.ifconfig = tokens.mid(1);
+        } else if (name == "topology") {
+            policy.topology = tokens.value(1);
         } else if (name == "route-nopull") {
             policy.routeNopull = true;
         } else if (name == "pull-filter" && tokens.size() >= 3) {
@@ -166,11 +281,12 @@ OvpnRoutingPolicy analyzeOvpnRouting(const QString &config)
     }
 
 #ifdef Q_OS_WIN
-    // For a config whose remote is the local wrapper (stunnel/wstunnel), the Windows helper adds
-    // "--route 0.0.0.0 128.0.0.0 vpn_gateway --route 128.0.0.0 128.0.0.0 vpn_gateway" on the command
-    // line (helper/windows/openvpn/openvpncontroller.cpp), using the same text test.
-    if (config.contains("remote 127.0.0.1")) {
-        policy.hasLowerHalfRoute = policy.hasUpperHalfRoute = true;
+    // For a config that dials a local wrapper (stunnel/wstunnel), the Windows helper appends
+    // "--pull-filter ignore redirect-gateway --route 0.0.0.0 128.0.0.0 vpn_gateway
+    // --route 128.0.0.0 128.0.0.0 vpn_gateway" after the config (openvpncontroller.cpp).
+    if (hasLoopbackWrapperRemote(config)) {
+        policy.pullFilters.append(OvpnPullFilter{"ignore", "redirect-gateway"});
+        policy.routes << OvpnRoute{"0.0.0.0", "128.0.0.0", "vpn_gateway"} << OvpnRoute{"128.0.0.0", "128.0.0.0", "vpn_gateway"};
     }
 #endif
     return policy;

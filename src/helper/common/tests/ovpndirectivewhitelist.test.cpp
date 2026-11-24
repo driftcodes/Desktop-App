@@ -179,6 +179,16 @@ void testBareDoubleDashRejected()
     VERIFY(contains(out, "remote example.com 1194"));
 }
 
+// Only a real "remote 127.0.0.1" directive marks a local-wrapper config.
+void testLoopbackWrapperRemote()
+{
+    VERIFY(OvpnDirectiveWhitelist::hasLoopbackWrapperRemote("client\nremote 127.0.0.1\nport 1194\n"));
+    VERIFY(OvpnDirectiveWhitelist::hasLoopbackWrapperRemote("--remote 127.0.0.1 1194 tcp\n"));
+    VERIFY(!OvpnDirectiveWhitelist::hasLoopbackWrapperRemote("# remote 127.0.0.1\nremote 5.6.7.8 443\n"));
+    VERIFY(!OvpnDirectiveWhitelist::hasLoopbackWrapperRemote("; via remote 127.0.0.1 locally\nremote 5.6.7.8 443\n"));
+    VERIFY(!OvpnDirectiveWhitelist::hasLoopbackWrapperRemote("remote 127.0.0.10 443\n"));
+}
+
 // Blocked directives at the top level are always stripped; allowed ones pass.
 void testTopLevelDirectiveFiltering()
 {
@@ -371,6 +381,7 @@ int main()
     testMaxLengthLineAccepted();
     testBareDoubleDashRejected();
     testTopLevelDirectiveFiltering();
+    testLoopbackWrapperRemote();
     testDhcpOptionValueFiltering();
     testDnsDirectiveFiltering();
     testAntiCensorshipIParamsPassThrough();

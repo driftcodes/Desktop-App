@@ -56,7 +56,9 @@ profile's own `redirect-gateway`, its own `0.0.0.0/1` + `128.0.0.0/1` routes, or
 `redirect-gateway` (with or without `def1`) or pushed `/1` routes that the profile does not drop with
 `route-nopull` or a matching `pull-filter` (a case-sensitive prefix match, quotes included). A
 `redirect-gateway` carrying `!ipv4`, pushed or not, means IPv4 is not redirected. Routes count when they go through
-the tunnel (`vpn_gateway`, `default`, or no gateway). Only lines that actually reach OpenVPN count: the
+the tunnel (`vpn_gateway`, `default`, no gateway, the pushed `route-gateway`, the `ifconfig` peer, or an
+address on the tunnel's subnet), and together they must cover all IPv4 addresses (two `/1`s, four
+`/2`s, `0.0.0.0/0`, or any other split). Only lines that actually reach OpenVPN count: the
 helper strips `route-noexec` and `redirect-private` from imported files, so they are ignored here too.
 The decision is made once connected, from the profile and the server's push together. Before,
 an imported profile with `pull-filter ignore redirect-gateway` (even with its own full routes), or one
