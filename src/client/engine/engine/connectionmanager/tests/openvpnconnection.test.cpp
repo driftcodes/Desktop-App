@@ -702,8 +702,18 @@ void TestOpenVPNConnection::testFirewallAfterConnectionFollowsConfigRouting()
                 .sendsAllIpv4ThroughTunnel(noPush));
     // A direct /1 next to def1's /1 ties; a tie counts as the tunnel (OpenVPN installs both).
     QVERIFY(analyzeOvpnRouting("redirect-gateway def1\n").sendsAllIpv4ThroughTunnel({"route 0.0.0.0 128.0.0.0 net_gateway"}));
+#ifdef Q_OS_WIN
+    // On Windows the helper's --msg-channel makes OpenVPN add def1 to every redirect-gateway, so the
+    // plain spelling installs the same two /1 routes and ties the same way.
+    QVERIFY(analyzeOvpnRouting("redirect-gateway\n").sendsAllIpv4ThroughTunnel({"route 0.0.0.0 128.0.0.0 net_gateway"}));
+#else
     // Without def1 the default route itself is replaced, so a direct /1 is more specific and wins.
     QVERIFY(!analyzeOvpnRouting("redirect-gateway\n").sendsAllIpv4ThroughTunnel({"route 0.0.0.0 128.0.0.0 net_gateway"}));
+#endif
+    // The in-tunnel DNS range is blocked off the tunnel even for custom configs: a direct route there
+    // is a real hole, unlike the rest of 10.0.0.0/8.
+    QVERIFY(analyzeOvpnRouting("redirect-gateway def1\nroute 10.20.0.0 255.255.0.0 net_gateway\n").sendsAllIpv4ThroughTunnel(noPush));
+    QVERIFY(!analyzeOvpnRouting("redirect-gateway def1\nroute 10.255.255.0 255.255.255.0 net_gateway\n").sendsAllIpv4ThroughTunnel(noPush));
     // Inline data never holds routing directives.
     QVERIFY(!analyzeOvpnRouting("<auth-user-pass>\nredirect-gateway def1\n</auth-user-pass>\n").sendsAllIpv4ThroughTunnel(noPush));
 
