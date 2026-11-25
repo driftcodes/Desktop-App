@@ -20,11 +20,13 @@ AutomaticAction afterConnected(FIREWALL_MODE mode, FIREWALL_WHEN when, bool isFi
 }
 
 void leaveConnection(FirewallController &controller, FirewallExceptions &exceptions,
-                     const std::function<QSet<QString>()> &notConnectedIps, bool allowLanTraffic, bool isCustomConfig)
+                     const std::function<QSet<QString>()> &notConnectedIps,
+                     const std::function<QSet<QString>()> &windscribeOnlyIps, bool allowLanTraffic, bool isCustomConfig)
 {
     exceptions.clearConnectionExceptions();
     if (controller.firewallActualState()) {
-        controller.firewallOn(exceptions.connectingIp(), notConnectedIps(), allowLanTraffic, isCustomConfig, false);
+        controller.firewallOn(exceptions.connectingIp(), notConnectedIps(), allowLanTraffic, isCustomConfig, false,
+                              windscribeOnlyIps());
     }
 }
 

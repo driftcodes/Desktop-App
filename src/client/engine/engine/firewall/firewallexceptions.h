@@ -35,9 +35,14 @@ public:
     //   them while the tunnel is down). Kept: loopback, the proxy, the advanced-parameters remote and
     //   the DNS servers (incl. ControlD): wsnet resolves every API hostname itself before handing the
     //   request to curl, even through a proxy, imported hostnames are looked up before dialing, and
-    //   ctrld starts before the tunnel is up;
+    //   ctrld starts before the tunnel is up. With scopeDnsToWindscribe (Windows) the DNS servers are
+    //   returned by getWindscribeOnlyIPAddressesForNotConnectedState() instead, so that only
+    //   Windscribe's own programs may reach them, not every program;
     // - otherwise: the full list (getIPAddressesForFirewall).
-    QSet<QString> getIPAddressesForNotConnectedState(bool isAlwaysOnPlus) const;
+    QSet<QString> getIPAddressesForNotConnectedState(bool isAlwaysOnPlus, bool scopeDnsToWindscribe) const;
+    // The addresses only Windscribe's own programs may reach while not connected: the DNS servers when
+    // a proxy is set and scopeDnsToWindscribe; otherwise none.
+    QSet<QString> getWindscribeOnlyIPAddressesForNotConnectedState(bool isAlwaysOnPlus, bool scopeDnsToWindscribe) const;
 
     // Forgets the finished connection's own exceptions: the server it dialed and its DNS servers.
     void clearConnectionExceptions();

@@ -13,16 +13,19 @@ FirewallController_win::~FirewallController_win()
 {
 }
 
-void FirewallController_win::firewallOn(const QString &connectingIp, const QSet<QString> &ips, bool bAllowLanTraffic, bool bIsCustomConfig, bool isVpnConnected)
+void FirewallController_win::firewallOn(const QString &connectingIp, const QSet<QString> &ips, bool bAllowLanTraffic, bool bIsCustomConfig, bool isVpnConnected,
+                                        const QSet<QString> &windscribeOnlyIps)
 {
     QMutexLocker locker(&mutex_);
-    FirewallController::firewallOn(connectingIp, ips, bAllowLanTraffic, bIsCustomConfig, isVpnConnected);
+    FirewallController::firewallOn(connectingIp, ips, bAllowLanTraffic, bIsCustomConfig, isVpnConnected, windscribeOnlyIps);
     if (isStateChanged())
     {
-        qCInfo(LOG_FIREWALL_CONTROLLER) << "firewall enabled with ips count:" << ips.count();
-        helper_->firewallOn(connectingIp, QStringList(ips.begin(), ips.end()), bAllowLanTraffic, bIsCustomConfig);
+        qCInfo(LOG_FIREWALL_CONTROLLER) << "firewall enabled with ips count:" << ips.count()
+                                        << "Windscribe-only ips count:" << windscribeOnlyIps.count();
+        helper_->firewallOn(connectingIp, QStringList(ips.begin(), ips.end()),
+                            QStringList(windscribeOnlyIps.begin(), windscribeOnlyIps.end()), bAllowLanTraffic, bIsCustomConfig);
     }
-    commitFirewallOn(connectingIp, ips, bAllowLanTraffic, bIsCustomConfig, isVpnConnected);
+    commitFirewallOn(connectingIp, ips, bAllowLanTraffic, bIsCustomConfig, isVpnConnected, windscribeOnlyIps);
 }
 
 void FirewallController_win::firewallOff()

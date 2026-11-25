@@ -973,7 +973,9 @@ void Engine::cleanupImpl(bool isUpdating)
             // that it should keep the firewall on.  If we don't do this, the firewall blips out briefly when the new helper starts,
             // until the app re-enables the firewall.
             qCInfo(LOG_BASIC) << "Turning on firewall on boot for update";
-            firewallController_->setFirewallOnBoot(true, firewallIpsWhileNotConnected(), engineSettings_.isAllowLanTraffic());
+            // The boot rules cannot scope by program, so they get both lists.
+            firewallController_->setFirewallOnBoot(true, firewallIpsWhileNotConnected() + firewallWindscribeOnlyIpsWhileNotConnected(),
+                                                   engineSettings_.isAllowLanTraffic());
         }
     }
 
@@ -1104,7 +1106,8 @@ void Engine::connectClickImpl(const LocationID &locationId, const types::Connect
                 firewallIpsWhileNotConnected(),
                 engineSettings_.isAllowLanTraffic(),
                 locationId_.isCustomConfigsLocation(),
-                false);
+                false,
+                firewallWindscribeOnlyIpsWhileNotConnected());
             emit firewallStateChanged(true);
         }
     }
@@ -2855,9 +2858,26 @@ void Engine::restoreWsnetProxySettings()
     WSNet::instance()->httpNetworkManager()->setProxySettings(proxySettings.curlAddress().toStdString(), proxySettings.getUsername().toStdString(), proxySettings.getPassword().toStdString());
 }
 
+namespace {
+#ifdef Q_OS_WIN
+// The Windows helper can limit a permit to Windscribe's own programs; with a proxy set, the DNS
+// servers are scoped that way while not connected (see FirewallExceptions).
+constexpr bool kScopeDnsToWindscribe = true;
+#else
+constexpr bool kScopeDnsToWindscribe = false;
+#endif
+}
+
 QSet<QString> Engine::firewallIpsWhileNotConnected() const
 {
-    return firewallExceptions_.getIPAddressesForNotConnectedState(engineSettings_.firewallSettings().mode == FIREWALL_MODE_ALWAYS_ON_PLUS);
+    return firewallExceptions_.getIPAddressesForNotConnectedState(engineSettings_.firewallSettings().mode == FIREWALL_MODE_ALWAYS_ON_PLUS,
+                                                                  kScopeDnsToWindscribe);
+}
+
+QSet<QString> Engine::firewallWindscribeOnlyIpsWhileNotConnected() const
+{
+    return firewallExceptions_.getWindscribeOnlyIPAddressesForNotConnectedState(
+        engineSettings_.firewallSettings().mode == FIREWALL_MODE_ALWAYS_ON_PLUS, kScopeDnsToWindscribe);
 }
 
 void Engine::updateFirewallSettings(bool forceTurnOn)
@@ -2870,7 +2890,8 @@ void Engine::updateFirewallSettings(bool forceTurnOn)
                 firewallIpsWhileNotConnected(),
                 engineSettings_.isAllowLanTraffic(),
                 locationId_.isCustomConfigsLocation(),
-                false);
+                false,
+                firewallWindscribeOnlyIpsWhileNotConnected());
         } else {
             firewallController_->firewallOn(
                 connectionManager_->getLastConnectedIp(),
@@ -3024,6 +3045,7 @@ void Engine::doDisconnectRestoreStuff()
 
     firewall_policy::leaveConnection(*firewallController_, firewallExceptions_,
                                      [this]() { return firewallIpsWhileNotConnected(); },
+                                     [this]() { return firewallWindscribeOnlyIpsWhileNotConnected(); },
                                      engineSettings_.isAllowLanTraffic(), locationId_.isCustomConfigsLocation());
 
 #ifdef Q_OS_WIN
@@ -3341,7 +3363,9 @@ void Engine::updateFirewallOnBoot()
 {
     if (engineSettings_.firewallSettings().isAlwaysOnMode()) {
         qCInfo(LOG_BASIC) << "Turning boot firewall on for always-on mode";
-        firewallController_->setFirewallOnBoot(true, firewallIpsWhileNotConnected(), engineSettings_.isAllowLanTraffic());
+        // The boot rules cannot scope by program, so they get both lists.
+        firewallController_->setFirewallOnBoot(true, firewallIpsWhileNotConnected() + firewallWindscribeOnlyIpsWhileNotConnected(),
+                                               engineSettings_.isAllowLanTraffic());
     } else {
         qCInfo(LOG_BASIC) << "Turning boot firewall off for non-always-on mode";
         firewallController_->setFirewallOnBoot(false);

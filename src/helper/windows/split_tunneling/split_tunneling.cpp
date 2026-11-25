@@ -83,6 +83,14 @@ SplitTunneling::SplitTunneling(FwpmWrapper& fwpmWrapper)
     appsIds.addFrom(vpnMainExecutableId_);
     appsIds.addFrom(vpnOtherExecutablesId_);
     FirewallFilter::instance().setVpnAppsIds(appsIds);
+
+    // For addresses only Windscribe's own programs may reach: the above, ctrld and this service.
+    AppsIds windscribeAppsIds = appsIds;
+    windscribeAppsIds.addFrom(ctrldExecutableId_);
+    AppsIds serviceId;
+    serviceId.setFromList({Utils::getExePath() + L"\\" + WS_APP_IDENTIFIER_W L"Service.exe"});
+    windscribeAppsIds.addFrom(serviceId);
+    FirewallFilter::instance().setWindscribeAppsIds(windscribeAppsIds);
 }
 
 void SplitTunneling::release()

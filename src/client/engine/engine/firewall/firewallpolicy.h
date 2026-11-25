@@ -22,8 +22,10 @@ AutomaticAction afterConnected(FIREWALL_MODE mode, FIREWALL_WHEN when, bool isFi
 
 // Leaving a connection (disconnect, or a terminal error after dialing): forgets its exceptions (the
 // server it dialed, its DNS servers) and, if the firewall is on, re-applies it for the not-connected
-// state with notConnectedIps(). It never turns the firewall on or off.
+// state with notConnectedIps() (every program) and windscribeOnlyIps() (Windscribe's programs only).
+// It never turns the firewall on or off.
 void leaveConnection(FirewallController &controller, FirewallExceptions &exceptions,
-                     const std::function<QSet<QString>()> &notConnectedIps, bool allowLanTraffic, bool isCustomConfig);
+                     const std::function<QSet<QString>()> &notConnectedIps,
+                     const std::function<QSet<QString>()> &windscribeOnlyIps, bool allowLanTraffic, bool isCustomConfig);
 
 } // namespace firewall_policy

@@ -15,8 +15,12 @@ public:
     explicit FirewallController(QObject *parent);
     virtual ~FirewallController() {}
 
-    // this function also uses for change firewall ips, then it is already enabled
-    virtual void firewallOn(const QString &connectingIp, const QSet<QString> &ips, bool bAllowLanTraffic, bool bIsCustomConfig, bool isVpnConnected);
+    // this function also uses for change firewall ips, then it is already enabled.
+    // windscribeOnlyIps: addresses permitted only for Windscribe's own programs (Windows: the client,
+    // its bundled tools, ctrld and the helper service), not for every program like ips. Only the
+    // Windows controller uses it; elsewhere it is empty.
+    virtual void firewallOn(const QString &connectingIp, const QSet<QString> &ips, bool bAllowLanTraffic, bool bIsCustomConfig,
+                            bool isVpnConnected, const QSet<QString> &windscribeOnlyIps = QSet<QString>());
     virtual void firewallOff();
     virtual bool firewallActualState() = 0;
 
@@ -34,11 +38,13 @@ protected:
     // SUCCESSFULLY applied state; they no longer latch it. Platform subclasses call these commit
     // helpers after the apply actually succeeds, so a failed apply can't poison the change-detection
     // baseline — the next call still sees a change and retries instead of short-circuiting.
-    void commitFirewallOn(const QString &connectingIp, const QSet<QString> &ips, bool bAllowLanTraffic, bool bIsCustomConfig, bool isVpnConnected);
+    void commitFirewallOn(const QString &connectingIp, const QSet<QString> &ips, bool bAllowLanTraffic, bool bIsCustomConfig, bool isVpnConnected,
+                          const QSet<QString> &windscribeOnlyIps = QSet<QString>());
     void commitFirewallOff();
 
     QString latestConnectingIp_;
     QSet<QString> latestIps_;
+    QSet<QString> latestWindscribeOnlyIps_;
     bool latestAllowLanTraffic_;
     bool latestIsCustomConfig_;
     bool latestEnabledState_;

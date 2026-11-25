@@ -19,7 +19,11 @@ public:
 
     void release();
 
-    void on(const wchar_t *connectingIp, const std::vector<std::wstring> &ips, bool bAllowLocalTraffic, bool bIsCustomConfig);
+    // ips are permitted for every program; windscribeOnlyIps only for Windscribe's own programs (see
+    // setWindscribeAppsIds) - not svchost, so the Windows DNS client cannot relay other programs'
+    // lookups through them.
+    void on(const wchar_t *connectingIp, const std::vector<std::wstring> &ips, const std::vector<std::wstring> &windscribeOnlyIps,
+            bool bAllowLocalTraffic, bool bIsCustomConfig);
     void off();
     bool currentStatus();
 
@@ -32,6 +36,9 @@ public:
     // addPermitFilterForSplitRoutingWhitelistIps via isV4()/isV6().
     void setSplitTunnelingWhitelistIps(const std::vector<types::IpAddressRange> &ips);
     void setVpnAppsIds(const AppsIds &appsIds);
+    // Windscribe's own programs for windscribeOnlyIps: the client and its bundled tools, ctrld and the
+    // helper service.
+    void setWindscribeAppsIds(const AppsIds &appsIds);
 
 private:
     FwpmWrapper &fwpmWrapper_;
@@ -45,7 +52,8 @@ private:
     bool currentStatusImpl(HANDLE engineHandle);
     void offImpl(HANDLE engineHandle);
 
-    void addFilters(HANDLE engineHandle, const wchar_t *connectingIp, const std::vector<std::wstring> &ips, bool bAllowLocalTraffic, bool bIsCustomConfig);
+    void addFilters(HANDLE engineHandle, const wchar_t *connectingIp, const std::vector<std::wstring> &ips,
+                    const std::vector<std::wstring> &windscribeOnlyIps, bool bAllowLocalTraffic, bool bIsCustomConfig);
     void addPermitFilterForVpnAndSystemServices(HANDLE engineHandle, const wchar_t *ip);
     void addPermitFilterForAppsIds(HANDLE engineHandle);
     void addPermitFilterForSplitRoutingWhitelistIps(HANDLE engineHandle);
@@ -60,6 +68,7 @@ private:
     bool isSplitTunnelingExclusiveMode_;
     AppsIds appsIds_;
     AppsIds vpnAppsIds_;
+    AppsIds windscribeAppsIds_;
     std::vector<types::IpAddressRange> splitRoutingIps_;
 
     std::vector<UINT64> filterIdsApps_;

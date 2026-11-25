@@ -193,9 +193,9 @@ bool Helper_win::getWireGuardStatus(types::WireGuardStatus *status)
     return true;
 }
 
-void Helper_win::firewallOn(const QString &connectingIp, const QStringList &ips, bool bAllowLanTraffic, bool bIsCustomConfig)
+void Helper_win::firewallOn(const QString &connectingIp, const QStringList &ips, const QStringList &windscribeOnlyIps, bool bAllowLanTraffic, bool bIsCustomConfig)
 {
-    sendCommand(HelperCommand::firewallOn, connectingIp.toStdWString(), toStdVector(ips), bAllowLanTraffic, bIsCustomConfig);
+    sendCommand(HelperCommand::firewallOn, connectingIp.toStdWString(), toStdVector(ips), toStdVector(windscribeOnlyIps), bAllowLanTraffic, bIsCustomConfig);
 }
 
 void Helper_win::firewallOff()

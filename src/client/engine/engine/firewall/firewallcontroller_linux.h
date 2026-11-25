@@ -12,7 +12,9 @@ public:
     explicit FirewallController_linux(QObject *parent, Helper *helper);
     ~FirewallController_linux() override;
 
-    void firewallOn(const QString &connectingIp, const QSet<QString> &ips, bool bAllowLanTraffic, bool bIsCustomConfig, bool isVpnConnected) override;
+    // windscribeOnlyIps is always empty here (the engine only scopes addresses on Windows).
+    void firewallOn(const QString &connectingIp, const QSet<QString> &ips, bool bAllowLanTraffic, bool bIsCustomConfig,
+                    bool isVpnConnected, const QSet<QString> &windscribeOnlyIps = QSet<QString>()) override;
     void firewallOff() override;
     bool firewallActualState() override;
 

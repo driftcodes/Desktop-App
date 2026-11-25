@@ -46,7 +46,7 @@ public:
     bool configureWireGuard(const WireGuardConfig &config);
     bool getWireGuardStatus(types::WireGuardStatus *status);
 
-    void firewallOn(const QString &connectingIp, const QStringList &ips, bool bAllowLanTraffic, bool bIsCustomConfig);
+    void firewallOn(const QString &connectingIp, const QStringList &ips, const QStringList &windscribeOnlyIps, bool bAllowLanTraffic, bool bIsCustomConfig);
     void firewallOff();
     bool firewallActualState();
 

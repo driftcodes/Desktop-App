@@ -139,7 +139,7 @@ QSet<QString> FirewallExceptions::getIPAddressesForFirewall() const
     return ipList.get();
 }
 
-QSet<QString> FirewallExceptions::getIPAddressesForNotConnectedState(bool isAlwaysOnPlus) const
+QSet<QString> FirewallExceptions::getIPAddressesForNotConnectedState(bool isAlwaysOnPlus, bool scopeDnsToWindscribe) const
 {
     if (isAlwaysOnPlus) {
         return getIPAddressesForFirewallForConnectedState();
@@ -154,6 +154,18 @@ QSet<QString> FirewallExceptions::getIPAddressesForNotConnectedState(bool isAlwa
     if (!remoteIP_.isEmpty()) {
         ipList.add(remoteIP_);
     }
+    if (!scopeDnsToWindscribe) {
+        addDnsServers(ipList);
+    }
+    return ipList.get();
+}
+
+QSet<QString> FirewallExceptions::getWindscribeOnlyIPAddressesForNotConnectedState(bool isAlwaysOnPlus, bool scopeDnsToWindscribe) const
+{
+    if (isAlwaysOnPlus || !isProxySet() || !scopeDnsToWindscribe) {
+        return QSet<QString>();
+    }
+    UniqueIpList ipList;
     addDnsServers(ipList);
     return ipList.get();
 }

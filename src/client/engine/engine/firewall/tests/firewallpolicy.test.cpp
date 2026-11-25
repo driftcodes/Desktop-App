@@ -16,12 +16,14 @@ class FakeFirewallController : public FirewallController
 public:
     explicit FakeFirewallController(bool isOn) : FirewallController(nullptr), isOn_(isOn) {}
 
-    void firewallOn(const QString &connectingIp, const QSet<QString> &ips, bool, bool, bool isVpnConnected) override
+    void firewallOn(const QString &connectingIp, const QSet<QString> &ips, bool, bool, bool isVpnConnected,
+                    const QSet<QString> &windscribeOnlyIps) override
     {
         isOn_ = true;
         ++onCalls;
         lastConnectingIp = connectingIp;
         lastIps = ips;
+        lastWindscribeOnlyIps = windscribeOnlyIps;
         lastIsVpnConnected = isVpnConnected;
     }
     void firewallOff() override
@@ -37,6 +39,7 @@ public:
     int offCalls = 0;
     QString lastConnectingIp;
     QSet<QString> lastIps;
+    QSet<QString> lastWindscribeOnlyIps;
     bool lastIsVpnConnected = true;
 
 private:
@@ -62,7 +65,7 @@ void TestFirewallPolicy::testNotConnectedExceptionsUnderProxy()
 {
     const FirewallExceptions exceptions = makeExceptions(true);
     QVERIFY(exceptions.isProxySet());
-    const QSet<QString> ips = exceptions.getIPAddressesForNotConnectedState(false);
+    const QSet<QString> ips = exceptions.getIPAddressesForNotConnectedState(false, false);
 
     QVERIFY(ips.contains("127.0.0.1"));
     // DNS stays: wsnet resolves API hostnames itself even through a proxy.
@@ -75,14 +78,35 @@ void TestFirewallPolicy::testNotConnectedExceptionsUnderProxy()
     QVERIFY(!ips.contains("5.6.7.8"));
 
     // Always On+ keeps its own (connected-state) list.
-    QCOMPARE(exceptions.getIPAddressesForNotConnectedState(true), exceptions.getIPAddressesForFirewallForConnectedState());
+    QCOMPARE(exceptions.getIPAddressesForNotConnectedState(true, false), exceptions.getIPAddressesForFirewallForConnectedState());
+    QVERIFY(exceptions.getWindscribeOnlyIPAddressesForNotConnectedState(false, false).isEmpty());
+
+    // Windows: the DNS servers move to the Windscribe-only list, so other programs cannot reach them.
+    const QSet<QString> scoped = exceptions.getIPAddressesForNotConnectedState(false, true);
+    const QSet<QString> windscribeOnly = exceptions.getWindscribeOnlyIPAddressesForNotConnectedState(false, true);
+    QVERIFY(scoped.contains("127.0.0.1"));
+    for (const QString &dns : HardcodedSettings::instance().cloudflareDns()) {
+        QVERIFY(!scoped.contains(dns));
+        QVERIFY(windscribeOnly.contains(dns));
+    }
+    for (const QString &controld : HardcodedSettings::instance().controldDns()) {
+        QVERIFY(!scoped.contains(controld));
+        QVERIFY(windscribeOnly.contains(controld));
+    }
+    QVERIFY(!windscribeOnly.contains("104.20.0.1"));
+    QVERIFY(!windscribeOnly.contains("127.0.0.1"));
+    // Always On+ scopes nothing (its list has no DNS servers at all).
+    QVERIFY(exceptions.getWindscribeOnlyIPAddressesForNotConnectedState(true, true).isEmpty());
 }
 
 void TestFirewallPolicy::testNotConnectedExceptionsWithoutProxy()
 {
     const FirewallExceptions exceptions = makeExceptions(false);
     QVERIFY(!exceptions.isProxySet());
-    QCOMPARE(exceptions.getIPAddressesForNotConnectedState(false), exceptions.getIPAddressesForFirewall());
+    QCOMPARE(exceptions.getIPAddressesForNotConnectedState(false, false), exceptions.getIPAddressesForFirewall());
+    // Without a proxy nothing is scoped, even on Windows: upstream behaviour.
+    QCOMPARE(exceptions.getIPAddressesForNotConnectedState(false, true), exceptions.getIPAddressesForFirewall());
+    QVERIFY(exceptions.getWindscribeOnlyIPAddressesForNotConnectedState(false, true).isEmpty());
     QVERIFY(exceptions.getIPAddressesForFirewall().contains("104.20.0.1"));
 }
 
@@ -95,7 +119,8 @@ void TestFirewallPolicy::testLeaveConnectionForgetsEndpointAndKeepsFirewallOn()
 
     FakeFirewallController controller(true);
     firewall_policy::leaveConnection(controller, exceptions,
-                                     [&exceptions]() { return exceptions.getIPAddressesForNotConnectedState(false); },
+                                     [&exceptions]() { return exceptions.getIPAddressesForNotConnectedState(false, true); },
+                                     [&exceptions]() { return exceptions.getWindscribeOnlyIPAddressesForNotConnectedState(false, true); },
                                      true, true);
 
     QVERIFY(exceptions.connectingIp().isEmpty());
@@ -106,6 +131,11 @@ void TestFirewallPolicy::testLeaveConnectionForgetsEndpointAndKeepsFirewallOn()
     QVERIFY(!controller.lastIsVpnConnected);
     QVERIFY(!controller.lastIps.contains("203.0.113.7"));
     QVERIFY(!controller.lastIps.contains("10.8.0.1"));
+    // The DNS servers reach the helper as Windscribe-only, not as an every-program permit.
+    for (const QString &dns : HardcodedSettings::instance().cloudflareDns()) {
+        QVERIFY(controller.lastWindscribeOnlyIps.contains(dns));
+        QVERIFY(!controller.lastIps.contains(dns));
+    }
 }
 
 void TestFirewallPolicy::testLeaveConnectionLeavesFirewallOff()
@@ -116,7 +146,8 @@ void TestFirewallPolicy::testLeaveConnectionLeavesFirewallOff()
 
     FakeFirewallController controller(false);
     firewall_policy::leaveConnection(controller, exceptions,
-                                     [&exceptions]() { return exceptions.getIPAddressesForNotConnectedState(false); },
+                                     [&exceptions]() { return exceptions.getIPAddressesForNotConnectedState(false, true); },
+                                     [&exceptions]() { return exceptions.getWindscribeOnlyIPAddressesForNotConnectedState(false, true); },
                                      true, true);
 
     QVERIFY(exceptions.connectingIp().isEmpty());

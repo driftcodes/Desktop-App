@@ -48,14 +48,21 @@ Emergency Connect is unchanged and never uses the proxy.
 - While connecting and connected, the server's IP is on the firewall's allowed list (as in the official
   app). That permits traffic to it but does not send any. Only OpenVPN and Windows system services may
   use it, and it is removed when the connection ends, including after a `CONNECTED,ROUTE_ERROR`.
-- While not connected (disconnected, connecting, or reconnecting after Wi-Fi or Throne drops), the
-  firewall still allows your DNS servers (and ControlD's) for every program. The app needs them:
-  Windscribe's network library looks up every API hostname itself before sending the request, even
-  through a proxy, so blocking DNS would break login and server lists while the firewall is on. With a
-  proxy set, the other upstream exceptions are dropped in that state: Windscribe's API server
-  addresses (requests go through the proxy) and the server ping targets. Windscribe's DNS leak filter
-  is also off between the old OpenVPN process exiting and the new one starting, so other programs'
-  DNS queries can reach those DNS servers directly during a reconnect.
+- While not connected (disconnected, connecting, or reconnecting after Wi-Fi or Throne drops) with a
+  proxy set, the firewall on Windows allows your DNS servers (and ControlD's) only for Windscribe's own
+  programs: the app (which does Windscribe's DNS lookups, including for hostname-based imported
+  profiles), its bundled tools, ctrld and the helper service. Any other program's DNS or DNS-over-HTTPS
+  to those addresses is blocked, also between the old OpenVPN process exiting and the new one starting
+  (when Windscribe's separate DNS leak filter is off). The Windows DNS Client service is not on that
+  list, so programs cannot route lookups through it either. Throne and other excluded apps keep their
+  own split-tunnel permit. The API server addresses and the ping targets are not allowed at all in
+  that state; the API goes through the proxy. Limits:
+  - A DNS server in a private range (for example your router, 192.168.x.x) stays reachable for every
+    program: the firewall always allows private ranges for imported profiles.
+  - The boot-time firewall (Always On, before the app starts) cannot tell programs apart, so it still
+    allows those DNS servers for every program until the app is running.
+  - macOS and Linux keep upstream's behaviour (DNS servers allowed for every program).
+  - Without a proxy nothing changes from the official app.
 
 ### Reconnecting
 

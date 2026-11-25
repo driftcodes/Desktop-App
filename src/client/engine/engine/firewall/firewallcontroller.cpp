@@ -6,7 +6,8 @@ FirewallController::FirewallController(QObject *parent) : QObject(parent),
 {
 }
 
-void FirewallController::firewallOn(const QString &connectingIp, const QSet<QString> &ips, bool bAllowLanTraffic, bool bIsCustomConfig, bool isVpnConnected)
+void FirewallController::firewallOn(const QString &connectingIp, const QSet<QString> &ips, bool bAllowLanTraffic, bool bIsCustomConfig, bool isVpnConnected,
+                                    const QSet<QString> &windscribeOnlyIps)
 {
     if (!bInitialized_) {
         bStateChanged_ = true;
@@ -14,16 +15,19 @@ void FirewallController::firewallOn(const QString &connectingIp, const QSet<QStr
         bStateChanged_ = (latestEnabledState_ != true ||
                           latestConnectingIp_ != connectingIp ||
                           latestIps_ != ips ||
+                          latestWindscribeOnlyIps_ != windscribeOnlyIps ||
                           latestAllowLanTraffic_ != bAllowLanTraffic ||
                           latestIsCustomConfig_ != bIsCustomConfig ||
                           latestIsVpnConnected_ != isVpnConnected);
     }
 }
 
-void FirewallController::commitFirewallOn(const QString &connectingIp, const QSet<QString> &ips, bool bAllowLanTraffic, bool bIsCustomConfig, bool isVpnConnected)
+void FirewallController::commitFirewallOn(const QString &connectingIp, const QSet<QString> &ips, bool bAllowLanTraffic, bool bIsCustomConfig, bool isVpnConnected,
+                                          const QSet<QString> &windscribeOnlyIps)
 {
     latestConnectingIp_ = connectingIp;
     latestIps_ = ips;
+    latestWindscribeOnlyIps_ = windscribeOnlyIps;
     latestAllowLanTraffic_ = bAllowLanTraffic;
     latestIsCustomConfig_ = bIsCustomConfig;
     latestIsVpnConnected_ = isVpnConnected;

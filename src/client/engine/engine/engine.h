@@ -473,7 +473,9 @@ private:
     // Puts the user's proxy back into wsnet (it is cleared while connected, when requests use the tunnel).
     void restoreWsnetProxySettings();
     // Firewall exceptions while not connected; see FirewallExceptions::getIPAddressesForNotConnectedState.
+    // The first is permitted for every program, the second only for Windscribe's own (Windows).
     QSet<QString> firewallIpsWhileNotConnected() const;
+    QSet<QString> firewallWindscribeOnlyIpsWhileNotConnected() const;
 
     void stopFetchingServerCredentials();
 

@@ -10,7 +10,8 @@ FirewallController_linux::~FirewallController_linux()
 {
 }
 
-void FirewallController_linux::firewallOn(const QString &connectingIp, const QSet<QString> &ips, bool bAllowLanTraffic, bool bIsCustomConfig, bool isVpnConnected)
+void FirewallController_linux::firewallOn(const QString &connectingIp, const QSet<QString> &ips, bool bAllowLanTraffic, bool bIsCustomConfig, bool isVpnConnected,
+                                          const QSet<QString> & /*windscribeOnlyIps*/)
 {
     QMutexLocker locker(&mutex_);
     FirewallController::firewallOn(connectingIp, ips, bAllowLanTraffic, bIsCustomConfig, isVpnConnected);

@@ -302,9 +302,10 @@ std::string firewallOn(const std::string &pars)
 
     std::wstring connectingIp;
     std::vector<std::wstring> ips;
+    std::vector<std::wstring> windscribeOnlyIps;
     bool bAllowLanTraffic;
     bool bIsCustomConfig;
-    deserializePars(pars, connectingIp, ips, bAllowLanTraffic, bIsCustomConfig);
+    deserializePars(pars, connectingIp, ips, windscribeOnlyIps, bAllowLanTraffic, bIsCustomConfig);
 
     // connectingIp may be empty (always-on firewall before any connection); when present it must
     // be a single IP. Rather than reject the whole request on bad input, sanitize it: drop an
@@ -315,18 +316,18 @@ std::string firewallOn(const std::string &pars)
         connectingIp.clear();
     }
 
-    ips.erase(std::remove_if(ips.begin(), ips.end(),
-                             [](const std::wstring &ip) {
-                                 if (NetworkValidation::isValidIpOrCidr(ip)) {
-                                     return false;
-                                 }
-                                 spdlog::error(L"firewallOn: dropping invalid IP/CIDR: \"{}\"", ip);
-                                 return true;
-                             }),
-              ips.end());
+    const auto isInvalid = [](const std::wstring &ip) {
+        if (NetworkValidation::isValidIpOrCidr(ip)) {
+            return false;
+        }
+        spdlog::error(L"firewallOn: dropping invalid IP/CIDR: \"{}\"", ip);
+        return true;
+    };
+    ips.erase(std::remove_if(ips.begin(), ips.end(), isInvalid), ips.end());
+    windscribeOnlyIps.erase(std::remove_if(windscribeOnlyIps.begin(), windscribeOnlyIps.end(), isInvalid), windscribeOnlyIps.end());
 
     bool prevStatus = FirewallFilter::instance().currentStatus();
-    FirewallFilter::instance().on(connectingIp.c_str(), ips, bAllowLanTraffic, bIsCustomConfig);
+    FirewallFilter::instance().on(connectingIp.c_str(), ips, windscribeOnlyIps, bAllowLanTraffic, bIsCustomConfig);
     if (!prevStatus) {
         SplitTunneling::instance().updateState();
     }
