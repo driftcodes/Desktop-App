@@ -163,7 +163,7 @@ DnsLeakFilterResult DnsFirewall::enable(bool permitApps, DnsLeakFilterOwner requ
     if (!requests_.acceptEnable(requester, permitApps, excludeIps)) {
         spdlog::info("DnsFirewall::enable() from {} ignored: the filter belongs to {}", static_cast<int>(requester),
                      static_cast<int>(requests_.ownership().owner()));
-        return DnsLeakFilterResult::kApplied;
+        return DnsLeakFilterResult::kIgnored;
     }
     startMonitor();
     return enableImpl();

@@ -98,15 +98,24 @@ void ProxiedDnsLeakFilter::onConnectState(CONNECT_STATE state, bool isProxySet, 
 {
     const bool isNewSession = state == CONNECT_STATE_CONNECTING && lastState_ == CONNECT_STATE_DISCONNECTED;
     lastState_ = state;
+    bool isReclaim = false;
     if (state == CONNECT_STATE_DISCONNECTED && wanted_ == DnsLeakFilter::kHandedOver &&
         isEnginesDnsLeakFilter(confirmed_)) {
-        // The hand-over never reached the helper (the direct attempt was held for it): the engine
-        // still holds its rules. Treat them as such, so an error with the firewall on keeps them
-        // instead of removing the only DNS filter there is. The pending hand-over is dropped.
+        // The hand-over was not confirmed (the direct attempt was held for it): the engine's rules are
+        // still the ones in place. Take them back, so an error with the firewall on keeps them instead
+        // of removing the only DNS filter there is. The pending hand-over is dropped.
         ++token_;
         wanted_ = confirmed_;
+        isReclaim = true;
     }
-    const DnsLeakFilterStep step = proxiedDnsLeakFilter(wanted_, state, isProxySet, keepAfterSession, isNewSession);
+    DnsLeakFilterStep step = proxiedDnsLeakFilter(wanted_, state, isProxySet, keepAfterSession, isNewSession);
+    if (isReclaim && isEnginesDnsLeakFilter(step.next)) {
+        // The helper may have acted on the hand-over with only its answer lost: it then no longer
+        // counts the engine as the owner and no longer watches the adapters' DNS servers. Claim the
+        // filter explicitly (retried until the helper confirms).
+        step.apply = true;
+        confirmed_ = DnsLeakFilter::kOff;
+    }
     if (state == CONNECT_STATE_CONNECTING && !isEnginesDnsLeakFilter(step.next)) {
         // A session without a proxy: its connector manages the filter itself. A pending retry (say, of
         // a failed disable after the previous proxied session) must not turn off what it enables.
@@ -190,6 +199,22 @@ bool ProxiedDnsLeakFilter::mayStartAttempt(bool isProxied)
         send();
     }
     return mayConnect(isProxied);
+}
+
+bool ProxiedDnsLeakFilter::mayReportConnected()
+{
+    if (!isEnginesDnsLeakFilter(wanted_)) {
+        return true;
+    }
+    if (wanted_ != DnsLeakFilter::kBlockAll) {
+        wanted_ = DnsLeakFilter::kBlockAll;
+        retryDelayMs_ = kFirstRetryMs;
+        send();
+    }
+    if (confirmed_ != DnsLeakFilter::kBlockAll) {
+        send();
+    }
+    return confirmed_ == DnsLeakFilter::kBlockAll;
 }
 
 void ProxiedDnsLeakFilter::apply(const DnsLeakFilterStep &step)

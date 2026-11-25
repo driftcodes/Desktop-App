@@ -72,7 +72,10 @@ Emergency Connect is unchanged and never uses the proxy.
     and the apps excluded in Exclusive split tunneling (Throne) may still use DNS there. A custom
     Connected DNS address is not exempt in this state either.
   - **While connected** it blocks your adapters' DNS servers for every program, except a custom
-    Connected DNS you chose, as in the official app.
+    Connected DNS you chose, as in the official app. A proxied connection is only reported as
+    Connected once the helper has confirmed these rules; if it cannot, Windscribe disconnects with the
+    DNS leak protection error rather than stay connected with the reconnect-time rules (which still let
+    Windscribe and Throne reach those DNS servers).
   - **When a DNS server changes**, on a new network or on the same Wi-Fi (a DHCP renewal or a manual
     DNS change), the helper notices it (it watches where Windows keeps each adapter's DNS settings,
     and checks every 2 seconds as a backup) and rebuilds the filter. This also applies to the filter

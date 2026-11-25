@@ -116,6 +116,11 @@ public:
     // attempt is not connected, so a proxied session needs the not-connected rules (local ranges
     // blocked, no custom DNS exception) confirmed, not the connected ones still in place.
     bool mayStartAttempt(bool isProxied);
+    // The tunnel is up, before the session is reported connected: the connected rules (every program
+    // blocked from the adapters' resolvers) replace the not-connected ones, which still let Windscribe
+    // and excluded apps reach them. false when the helper has not confirmed them (after one more
+    // try); the session must not be reported connected then.
+    bool mayReportConnected();
 
 private:
     void apply(const DnsLeakFilterStep &step);

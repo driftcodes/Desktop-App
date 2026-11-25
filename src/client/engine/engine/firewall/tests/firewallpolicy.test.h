@@ -27,6 +27,9 @@ private slots:
     void testEngineTrafficKeepsRequestProxy();
     void testDirectConnectorNeedsItsOwnRules();
     void testLocationSwitchAppliesNewRequestProxy();
+    void testConnectedReportedOnlyWithConnectedRules();
+    void testLostHandOverReplyReclaimsFilter();
+    void testIgnoredConnectorRequestIsNotInstalled();
     void testRetryBacksOffAndStopsOnSuccess();
     void testDnsLeakFilterKeptAfterErrorUntilFirewallOff();
 };

@@ -1075,6 +1075,7 @@ void Engine::sendConfirmEmailImpl()
 
 void Engine::connectClickImpl(const LocationID &locationId, const types::ConnectionSettings &connectionSettings, const QPair<QString, QString> &pinnedNode)
 {
+    pendingDisconnectError_ = ConnectError::kNoError;
     // The proxy settings this request is made with, kept until the session ends.
     requestProxySettings_.onRequest(ProxyServerController::instance().getCurrentProxySettings());
     // A location switch never passes through DISCONNECTED: point the API, the firewall's proxy
@@ -1560,6 +1561,17 @@ void Engine::acceptMyIp(const QString &ip, bool isFromDisconnectedState)
 
 void Engine::onConnectionManagerConnected()
 {
+#ifdef Q_OS_WIN
+    // A proxied session is reported connected only with the connected DNS rules confirmed: until then
+    // the not-connected ones are in place, which let Windscribe and excluded apps (Throne) reach the
+    // adapters' DNS servers.
+    if (proxiedDnsLeakFilter_ && !proxiedDnsLeakFilter_->mayReportConnected()) {
+        qCCritical(LOG_CONNECTION) << "The connected DNS leak rules could not be installed; disconnecting";
+        pendingDisconnectError_ = ConnectError::kDnsLeakProtectionFailed;
+        connectionManager_->clickDisconnect(DISCONNECTED_WITH_ERROR);
+        return;
+    }
+#endif
     QString adapterName = connectionManager_->getVpnAdapterInfo().adapterName();
 
 #ifdef Q_OS_WIN
@@ -1792,7 +1804,12 @@ void Engine::onConnectionManagerDisconnected(DISCONNECT_REASON reason)
     // Connection Settings override is one-time only, reset it
     connectionSettingsOverride_ = types::ConnectionSettings(types::Protocol(types::Protocol::TYPE::UNINITIALIZED), 0, true);
 
-    connectStateController_->setDisconnectedState(reason, ConnectError::kNoError);
+    // An engine-initiated stop after the tunnel came up (e.g. the connected DNS rules could not be
+    // installed) reports its error here.
+    const ConnectError disconnectError = pendingDisconnectError_;
+    pendingDisconnectError_ = ConnectError::kNoError;
+    connectStateController_->setDisconnectedState(
+        disconnectError == ConnectError::kNoError ? reason : DISCONNECTED_WITH_ERROR, disconnectError);
 }
 
 void Engine::onConnectionManagerReconnecting()
@@ -3318,6 +3335,7 @@ firewall_policy::DnsLeakFilterSendResult Engine::sendProxiedDnsLeakFilter(firewa
         qCWarning(LOG_BASIC) << "DNS leak filter: blocks in place but incomplete; retrying";
         return DnsLeakFilterSendResult::kIncomplete;
     case DnsLeakFilterResult::kFailed:
+    case DnsLeakFilterResult::kIgnored:  // not expected: the engine may always claim the filter
         break;
     }
     qCCritical(LOG_BASIC) << "DNS leak filter: the helper could not apply" << static_cast<int>(filter)

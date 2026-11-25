@@ -5,8 +5,10 @@ enum class DnsLeakFilterResult : int {
     kFailed = 0,      // nothing changed: the rules in place before stay
     kIncomplete = 1,  // blocks are in place, but a permit is missing or the adapters could not be read
                       // (only local-network and last known resolvers covered); retried
-    kApplied = 2      // also: the request was not the owner's to make and was ignored (see
-                      // DnsLeakFilterOwnership); there is nothing of the caller's left to change
+    kApplied = 2,     // also for a disable that was not the owner's to make (nothing of the caller's
+                      // is left to remove)
+    kIgnored = 3      // an enable that was not the owner's to make (see DnsLeakFilterOwnership): the
+                      // rules in place are someone else's
 };
 
 // Whether a connector's own DNS leak filter is in place after its enable request: the blocks are in
@@ -15,7 +17,7 @@ enum class DnsLeakFilterResult : int {
 // adapter's DNS servers) or none at all.
 inline bool isDnsLeakFilterInstalled(DnsLeakFilterResult result)
 {
-    return result != DnsLeakFilterResult::kFailed;
+    return result == DnsLeakFilterResult::kApplied || result == DnsLeakFilterResult::kIncomplete;
 }
 
 // Who may change the Windows DNS leak filter. Two callers share it: the OpenVPN / WireGuard / IKEv2

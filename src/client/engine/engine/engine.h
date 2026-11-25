@@ -361,6 +361,8 @@ private:
     // The proxy settings of the request in progress (see RequestProxySettings), else the preference.
     types::ProxySettings requestProxySettings() const;
     RequestProxySettings requestProxySettings_;
+    // Set when the engine stops a session itself with an error (see onConnectionManagerConnected).
+    ConnectError pendingDisconnectError_ = ConnectError::kNoError;
 
 #ifdef Q_OS_WIN
     void enableDohSettings();
