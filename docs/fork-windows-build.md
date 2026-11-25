@@ -93,8 +93,11 @@ Emergency Connect is unchanged and never uses the proxy.
   - **One owner at a time.** The filter is shared with Windscribe's ordinary (no proxy) connections,
     whose OpenVPN turns it on and off itself. While a proxied session holds it, the helper ignores
     those requests, so switching location from a connection without a proxy to one with a proxy cannot
-    have the old connection remove the new one's filter as it shuts down. A new connection without a
-    proxy (also after a proxied one ended with an error) hands the filter back to its own OpenVPN.
+    have the old connection remove the new one's filter as it shuts down. Who holds the filter follows
+    the proxy setting of the connection you pick, decided the moment you pick it (also while the
+    previous one still shows Connecting): a proxied one takes the filter at once; one without a proxy
+    lets the previous session keep it until that session has ended, then hands it to its own OpenVPN
+    (also after a proxied session ended with an error).
   - Removing an app from the Exclusive exclusions takes away its DNS permit too; if that rebuild fails,
     the helper retries until the permit is gone.
 

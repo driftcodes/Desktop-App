@@ -87,6 +87,14 @@ public:
     // the filter has not been the engine's since (a connector without a proxy managed it).
     DnsLeakFilter confirmed() const { return confirmed_; }
     bool isBlockConfirmed() const { return confirmed_ != DnsLeakFilter::kOff; }
+    // The engine accepted a connection request (a connect, a location switch, a redial it starts);
+    // isProxied: whether that request uses the proxy, isPreviousSessionActive: whether an earlier
+    // session is still being torn down. A proxied request claims the filter right away, before the
+    // outgoing connector is told to stop, so its teardown is ignored. A request without a proxy hands
+    // the filter to its own connector, but only once the earlier session is gone, so that session
+    // keeps its protection while it ends.
+    void onConnectRequest(bool isProxied, bool isPreviousSessionActive);
+
     // isProxied: whether the request being started uses the proxy (its own settings, not the connect
     // state: a request replacing an attempt still CONNECTING brings no new CONNECTING). A proxied
     // request while the filter is not the engine's makes the engine take it over first.

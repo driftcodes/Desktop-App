@@ -276,7 +276,16 @@ struct FakeDnsLeakFilterHelper
     // The rules the real helper has in place, from the engine's requests or a connector's, with the
     // helper's ownership rules (the real DnsLeakFilterOwnership).
     firewall_policy::DnsLeakFilter inPlace = firewall_policy::DnsLeakFilter::kOff;
+    QList<firewall_policy::DnsLeakFilter> history;  // every change of inPlace, in order
     DnsLeakFilterOwnership ownership;
+
+    void set(firewall_policy::DnsLeakFilter f)
+    {
+        if (f != inPlace) {
+            inPlace = f;
+            history << f;
+        }
+    }
 
     firewall_policy::ProxiedDnsLeakFilter makeController()
     {
@@ -293,7 +302,7 @@ struct FakeDnsLeakFilterHelper
                     ownership.acceptEnable(DnsLeakFilterOwner::kProxiedSession);
                 }
                 if (answer != DnsLeakFilterSendResult::kFailed) {
-                    inPlace = f;
+                    set(f);
                 }
                 return answer;
             },
@@ -304,13 +313,13 @@ struct FakeDnsLeakFilterHelper
     void connectorStarts()
     {
         if (ownership.acceptEnable(DnsLeakFilterOwner::kConnection)) {
-            inPlace = firewall_policy::DnsLeakFilter::kBlockAll;
+            set(firewall_policy::DnsLeakFilter::kBlockAll);
         }
     }
     void connectorEnds()
     {
         if (ownership.acceptDisable(DnsLeakFilterOwner::kConnection)) {
-            inPlace = firewall_policy::DnsLeakFilter::kOff;
+            set(firewall_policy::DnsLeakFilter::kOff);
         }
     }
 };
@@ -557,39 +566,45 @@ void TestFirewallPolicy::testNewUnproxiedSessionAfterErrorTakesOverFilter()
 void TestFirewallPolicy::testProxiedRequestReplacingAttemptStillConnecting()
 {
     using namespace firewall_policy;
-    // The engine's connect check sees the replacement request first.
+    // The order Engine::connectClickImpl takes: the request is accepted (onConnectRequest) before the
+    // earlier attempt is told to stop, and again once it has ended; then the connect check and the
+    // connection manager's per-attempt check.
     {
         FakeDnsLeakFilterHelper helper;
         auto filter = helper.makeController();
-        // An attempt without a proxy is still CONNECTING; its connector holds the filter.
+        // A direct attempt (no proxy) is still CONNECTING; its connector holds the filter.
         filter.onConnectState(CONNECT_STATE_CONNECTING, false, false);
         helper.connectorStarts();
         QCOMPARE(helper.inPlace, DnsLeakFilter::kBlockAll);
+        const int historyBefore = helper.history.size();
 
-        // The proxy is turned on and another profile picked: the state stays CONNECTING, so no new
-        // CONNECTING arrives. The replacement request is proxied.
-        QVERIFY(filter.mayConnect(true));
-        QCOMPARE(filter.wanted(), DnsLeakFilter::kPermitWindscribeApps);
+        // The proxy is turned on and another profile picked: the state stays CONNECTING. The engine
+        // accepts the proxied request while the old attempt is still running.
+        filter.onConnectRequest(true, true);
         QCOMPARE(helper.inPlace, DnsLeakFilter::kPermitWindscribeApps);
-
-        // The old connector ends: ignored. The new (proxied) one does not touch the filter.
+        // The old connector ends: ignored.
         helper.connectorEnds();
+        // Re-entered once it has ended; then the checks.
+        filter.onConnectRequest(true, false);
+        QVERIFY(filter.mayConnect(true));
         QVERIFY(filter.mayStartAttempt(true));
-        QCOMPARE(helper.inPlace, DnsLeakFilter::kPermitWindscribeApps);
         filter.onConnectState(CONNECT_STATE_CONNECTED, true, false);
         QCOMPARE(helper.inPlace, DnsLeakFilter::kBlockAll);
+
+        // The filter was never off at any point of the hand-over.
+        for (int i = historyBefore; i < helper.history.size(); ++i) {
+            QVERIFY(helper.history[i] != DnsLeakFilter::kOff);
+        }
         filter.onConnectState(CONNECT_STATE_DISCONNECTING, true, false);
         filter.onConnectState(CONNECT_STATE_DISCONNECTED, true, false);
         QCOMPARE(helper.inPlace, DnsLeakFilter::kOff);
     }
-    // Only the connection manager's per-attempt check sees it (its own redial with the new request).
+    // Fallback: the connection manager's own redial is the first to see a proxied request (its
+    // request was updated underneath). The per-attempt check claims the filter before dialing.
     {
         FakeDnsLeakFilterHelper helper;
         auto filter = helper.makeController();
         filter.onConnectState(CONNECT_STATE_CONNECTING, false, false);
-        helper.connectorStarts();
-        helper.connectorEnds();  // the old connector is already gone
-        QCOMPARE(helper.inPlace, DnsLeakFilter::kOff);
         QVERIFY(filter.mayStartAttempt(true));
         QCOMPARE(helper.inPlace, DnsLeakFilter::kPermitWindscribeApps);
         QCOMPARE(helper.sent.size(), 1);
@@ -599,9 +614,71 @@ void TestFirewallPolicy::testProxiedRequestReplacingAttemptStillConnecting()
         FakeDnsLeakFilterHelper helper;
         auto filter = helper.makeController();
         filter.onConnectState(CONNECT_STATE_CONNECTING, false, false);
-        helper.answers = {DnsLeakFilterSendResult::kFailed, DnsLeakFilterSendResult::kFailed};
+        helper.answers = {DnsLeakFilterSendResult::kFailed, DnsLeakFilterSendResult::kFailed,
+                          DnsLeakFilterSendResult::kFailed};
+        filter.onConnectRequest(true, true);
         QVERIFY(!filter.mayStartAttempt(true));
         QCOMPARE(helper.inPlace, DnsLeakFilter::kOff);
+    }
+}
+
+void TestFirewallPolicy::testDirectRequestReplacingProxiedSession()
+{
+    using namespace firewall_policy;
+    {
+        FakeDnsLeakFilterHelper helper;
+        auto filter = helper.makeController();
+        // A proxied session is connected; the engine holds the filter.
+        filter.onConnectRequest(true, false);
+        filter.onConnectState(CONNECT_STATE_CONNECTING, true, false);
+        QVERIFY(filter.mayStartAttempt(true));
+        filter.onConnectState(CONNECT_STATE_CONNECTED, true, false);
+        QCOMPARE(helper.inPlace, DnsLeakFilter::kBlockAll);
+
+        // The proxy is turned off and another profile picked. While the proxied session is still
+        // being torn down it keeps its filter.
+        filter.onConnectState(CONNECT_STATE_CONNECTING, false, false);
+        filter.onConnectRequest(false, true);
+        QVERIFY(helper.inPlace != DnsLeakFilter::kOff);
+        // Once it has ended, the new direct request takes over: its connector's rules are installed.
+        filter.onConnectRequest(false, false);
+        QVERIFY(filter.mayConnect(false));
+        QVERIFY(filter.mayStartAttempt(false));
+        helper.connectorStarts();
+        QCOMPARE(helper.inPlace, DnsLeakFilter::kBlockAll);
+        QCOMPARE(helper.ownership.owner(), DnsLeakFilterOwner::kConnection);
+        filter.onConnectState(CONNECT_STATE_CONNECTED, false, false);
+        helper.connectorEnds();
+        QCOMPARE(helper.inPlace, DnsLeakFilter::kOff);
+    }
+    // The old session's reconnect rules cannot be installed: the new direct request is not refused
+    // for it, and its connector still gets the filter.
+    {
+        FakeDnsLeakFilterHelper helper;
+        auto filter = helper.makeController();
+        filter.onConnectRequest(true, false);
+        filter.onConnectState(CONNECT_STATE_CONNECTING, true, false);
+        filter.onConnectState(CONNECT_STATE_CONNECTED, true, false);
+        helper.answers = {DnsLeakFilterSendResult::kFailed, DnsLeakFilterSendResult::kFailed};
+        filter.onConnectState(CONNECT_STATE_CONNECTING, false, false);
+        filter.onConnectRequest(false, true);
+        filter.onConnectRequest(false, false);
+        QVERIFY(filter.mayConnect(false));
+        QVERIFY(filter.mayStartAttempt(false));
+        helper.connectorStarts();
+        QCOMPARE(helper.inPlace, DnsLeakFilter::kBlockAll);
+    }
+    // An automatic retry of the proxied request itself keeps the engine's filter.
+    {
+        FakeDnsLeakFilterHelper helper;
+        auto filter = helper.makeController();
+        filter.onConnectRequest(true, false);
+        filter.onConnectState(CONNECT_STATE_CONNECTING, true, false);
+        filter.onConnectState(CONNECT_STATE_CONNECTED, true, false);
+        filter.onConnectState(CONNECT_STATE_CONNECTING, true, false);
+        QVERIFY(filter.mayStartAttempt(true));
+        QCOMPARE(helper.inPlace, DnsLeakFilter::kPermitWindscribeApps);
+        QCOMPARE(helper.ownership.owner(), DnsLeakFilterOwner::kProxiedSession);
     }
 }
 

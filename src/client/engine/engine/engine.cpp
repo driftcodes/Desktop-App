@@ -1078,6 +1078,16 @@ void Engine::connectClickImpl(const LocationID &locationId, const types::Connect
     locationId_ = locationId;
     connectionSettingsOverride_ = connectionSettings;
     pinnedNode_ = pinnedNode;
+#ifdef Q_OS_WIN
+    // Decide who holds the DNS leak filter from this request's proxy setting (doConnect() builds the
+    // request with it) before an earlier session is told to stop: its connector's teardown must not
+    // leave a proxied replacement without the filter. Runs again when this is re-entered after that
+    // session has ended.
+    if (proxiedDnsLeakFilter_) {
+        proxiedDnsLeakFilter_->onConnectRequest(ProxyServerController::instance().getCurrentProxySettings().isProxyEnabled(),
+                                                !connectionManager_->isDisconnected());
+    }
+#endif
     // with bridge API token requests suppressed, pinIp is a successful no-op that would report an unverified IP, so drop the pin
     if (ExtraConfig::instance().getSuppressApiToken()) {
         pinnedNode_.second.clear();

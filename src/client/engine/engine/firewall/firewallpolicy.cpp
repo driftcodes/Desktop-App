@@ -142,6 +142,19 @@ void ProxiedDnsLeakFilter::claimForProxiedRequest(bool isProxied)
     }
 }
 
+void ProxiedDnsLeakFilter::onConnectRequest(bool isProxied, bool isPreviousSessionActive)
+{
+    if (isProxied) {
+        claimForProxiedRequest(true);
+    } else if (wanted_ != DnsLeakFilter::kOff && !isPreviousSessionActive) {
+        // Hand-over: the helper passes ownership on even if the removal fails, and ignores this
+        // engine's retries once the connector holds the filter.
+        ++token_;
+        confirmed_ = DnsLeakFilter::kOff;
+        apply({DnsLeakFilter::kOff, true});
+    }
+}
+
 bool ProxiedDnsLeakFilter::mayConnect(bool isProxied)
 {
     claimForProxiedRequest(isProxied);
