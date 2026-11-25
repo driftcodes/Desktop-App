@@ -83,10 +83,13 @@ Emergency Connect is unchanged and never uses the proxy.
     If the adapters cannot be read while not connected, the local-network ranges and the DNS servers
     known from before are still blocked. A missing permit for Windscribe's own programs fails closed:
     the blocks go in, Windscribe may be unable to look up hostnames until a retry succeeds.
-  - **No connection without the filter.** With a proxy set, Windscribe does not start connecting until
-    the helper has confirmed the filter's blocks. If it cannot, you get "Windscribe could not set up its
-    DNS leak protection, so it did not connect"; it keeps trying in the background, so connecting again
-    a moment later usually works.
+  - **No connection attempt without the filter.** With a proxy set, Windscribe does not start an
+    attempt, the first one or any automatic reconnect or retry, until the helper has confirmed exactly
+    the not-connected rules above. Rules confirmed earlier do not count if they are different ones
+    (for example the connected rules still in place when a reconnect starts) or if a connection without
+    a proxy has used the filter since. If it cannot get them, you get "Windscribe could not set up its
+    DNS leak protection, so it did not connect" (also in the middle of a reconnect); it keeps trying in
+    the background, so connecting again a moment later usually works.
   - Removing an app from the Exclusive exclusions takes away its DNS permit too; if that rebuild fails,
     the helper retries until the permit is gone.
 
@@ -165,9 +168,12 @@ adapter** with Wireshark (filter: `udp.port == 53 || tcp.port == 53`). Find your
    there; that is expected.
 3. While it shows Connecting, join a different Wi-Fi network (or a phone hotspot) whose router has
    another address, and query that router the same way: it must not appear on the capture either.
-   Then, while connected, change the Wi-Fi adapter's DNS server by hand (Settings > Network > Wi-Fi >
-   your network > DNS server assignment) to another address on your LAN, wait 3 seconds, and query
-   it: it must not appear on the capture.
+   Then, while connected, start a loop querying another address on your LAN once a second (as above,
+   with that address), and while it runs change the Wi-Fi adapter's DNS server to that address by hand
+   (Settings > Network > Wi-Fi > your network > DNS server assignment). Keep the loop running before,
+   during and for a while after the change: a query reaching that address on the capture right after
+   the change is the short gap until the helper rebuilds the filter (normally under 2 seconds); any
+   query reaching it later is a leak.
 4. Stop Throne while connected. The app should end with "could not reach the proxy" and the firewall
    should stay on; the lookups must still not appear on the capture. Start Throne and connect again.
 5. Disconnect and reconnect from the app, and check the same while it connects.

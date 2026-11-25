@@ -89,8 +89,10 @@ void ProxiedDnsLeakFilter::onConnectState(CONNECT_STATE state, bool isProxySet, 
     const DnsLeakFilterStep step = proxiedDnsLeakFilter(wanted_, state, isProxySet, keepAfterSession);
     if (state == CONNECT_STATE_CONNECTING && step.next == DnsLeakFilter::kOff) {
         // A session without a proxy: its connector manages the filter itself. A pending retry (say, of
-        // a failed disable after the previous proxied session) must not turn off what it enables.
+        // a failed disable after the previous proxied session) must not turn off what it enables, and
+        // nothing confirmed before still holds: the connector removes the filter when it ends.
         ++token_;
+        confirmed_ = DnsLeakFilter::kOff;
     }
     apply(step);
 }
@@ -120,11 +122,22 @@ void ProxiedDnsLeakFilter::onRetry(quint64 token)
 
 bool ProxiedDnsLeakFilter::mayConnect()
 {
-    if (wanted_ == DnsLeakFilter::kOff || isBlockConfirmed_) {
+    if (wanted_ == DnsLeakFilter::kOff || confirmed_ == wanted_) {
         return true;
     }
     send();
-    return isBlockConfirmed_;
+    return confirmed_ == wanted_;
+}
+
+bool ProxiedDnsLeakFilter::mayStartAttempt()
+{
+    if (wanted_ == DnsLeakFilter::kBlockAll) {
+        // The connection manager retries before the engine has seen the reconnect.
+        wanted_ = DnsLeakFilter::kPermitWindscribeApps;
+        retryDelayMs_ = kFirstRetryMs;
+        send();
+    }
+    return mayConnect();
 }
 
 void ProxiedDnsLeakFilter::apply(const DnsLeakFilterStep &step)
@@ -144,15 +157,15 @@ void ProxiedDnsLeakFilter::send()
     const DnsLeakFilterSendResult result = send_(wanted_);
     if (wanted_ == DnsLeakFilter::kOff) {
         if (result == DnsLeakFilterSendResult::kApplied) {
-            isBlockConfirmed_ = false;
+            confirmed_ = DnsLeakFilter::kOff;
             retryDelayMs_ = kFirstRetryMs;
             return;
         }
     } else {
-        // Blocks are in place either way unless it failed; a failure keeps the previous rules, which
-        // hold a block only if one was confirmed before.
+        // The wanted rules' blocks are in place unless it failed; a failure keeps the previous rules,
+        // so confirmed_ keeps naming them.
         if (result != DnsLeakFilterSendResult::kFailed) {
-            isBlockConfirmed_ = true;
+            confirmed_ = wanted_;
         }
         if (result == DnsLeakFilterSendResult::kApplied) {
             retryDelayMs_ = kFirstRetryMs;

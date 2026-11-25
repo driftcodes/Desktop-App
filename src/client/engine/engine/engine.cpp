@@ -745,6 +745,7 @@ void Engine::initPart2()
                 }
             });
         });
+    connectionManager_->setAttemptGate([this]() { return proxiedDnsLeakFilter_->mayStartAttempt(); });
     // A DNS leak filter kept after a proxied session ended goes off with the firewall.
     connect(this, &Engine::firewallStateChanged, this, [this](bool isEnabled) {
         if (!isEnabled) {
@@ -1844,6 +1845,12 @@ void Engine::onConnectionManagerError(ConnectError err, const CurrentConnectionD
         // disconnect: restore the proxy and DNS, forget the server's firewall exception, and keep the
         // firewall in whatever state it was (on stays on). Other errors keep their existing handling.
         qCWarning(LOG_BASIC) << "Route setup failed after connecting; restoring the disconnected state";
+        doDisconnectRestoreStuff();
+    }
+    else if (err == ConnectError::kDnsLeakProtectionFailed)
+    {
+        // A reconnect of a connected session can stop here: restore the disconnected state as above.
+        qCWarning(LOG_BASIC) << "DNS leak protection could not be set up for the attempt; restoring the disconnected state";
         doDisconnectRestoreStuff();
     }
     /*else if (err == IKEV_FAILED_REINSTALL_WAN_WIN)

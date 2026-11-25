@@ -745,6 +745,13 @@ void ConnectionManager::startAttempt()
         return;
     }
 
+    // Before anything of the attempt reaches the network (hostname lookups included).
+    if (attemptGate_ && !attemptGate_()) {
+        qCCritical(LOG_CONNECTION) << "DNS leak protection is not in place for this attempt, stopping";
+        failWithError(ConnectError::kDnsLeakProtectionFailed);
+        return;
+    }
+
     qCInfo(LOG_CONNECTION) << "Default adapter and gateway:" << defaultAdapterInfo_.makeLogString();
     emit defaultAdapterDetected(defaultAdapterInfo_);
     connectTimer_.stop();

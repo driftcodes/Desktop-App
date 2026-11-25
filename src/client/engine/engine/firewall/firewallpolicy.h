@@ -79,10 +79,17 @@ public:
     void onRetry(quint64 token);
 
     DnsLeakFilter wanted() const { return wanted_; }
-    bool isBlockConfirmed() const { return isBlockConfirmed_; }
+    // The filter the helper last confirmed for the engine (blocks in place); kOff when none, or when
+    // the filter has not been the engine's since (a connector without a proxy managed it).
+    DnsLeakFilter confirmed() const { return confirmed_; }
+    bool isBlockConfirmed() const { return confirmed_ != DnsLeakFilter::kOff; }
     // Whether a proxied connection may start: the filter is not the engine's, or the helper has
-    // confirmed a block. If not, it asks the helper once more first.
+    // confirmed exactly the wanted rules. If not, it asks the helper once more first.
     bool mayConnect();
+    // Before every attempt of a proxied session, the first and each retry the connection manager
+    // starts on its own: an attempt is not connected, so it needs the not-connected rules (local
+    // ranges blocked, no custom DNS exception) confirmed, not the connected ones still in place.
+    bool mayStartAttempt();
 
 private:
     void apply(const DnsLeakFilterStep &step);
@@ -91,7 +98,7 @@ private:
     Send send_;
     ScheduleRetry scheduleRetry_;
     DnsLeakFilter wanted_ = DnsLeakFilter::kOff;
-    bool isBlockConfirmed_ = false;
+    DnsLeakFilter confirmed_ = DnsLeakFilter::kOff;
     quint64 token_ = 0;
     int retryDelayMs_ = kFirstRetryMs;
 };
