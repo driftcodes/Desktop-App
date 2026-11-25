@@ -321,11 +321,18 @@ struct FakeDnsLeakFilterHelper
     }
 
     // An OpenVPN connector without a proxy starting / ending (its run() enables / disables the filter).
-    void connectorStarts()
+    // installFails: the helper takes the request (the connector owns the filter) but cannot replace
+    // the rules, which stay as they were. Returns what the helper answers.
+    DnsLeakFilterResult connectorStarts(bool installFails = false)
     {
-        if (ownership.acceptEnable(DnsLeakFilterOwner::kConnection)) {
-            set(firewall_policy::DnsLeakFilter::kBlockAll);
+        if (!ownership.acceptEnable(DnsLeakFilterOwner::kConnection)) {
+            return DnsLeakFilterResult::kApplied;  // ignored
         }
+        if (installFails) {
+            return DnsLeakFilterResult::kFailed;
+        }
+        set(firewall_policy::DnsLeakFilter::kBlockAll);
+        return DnsLeakFilterResult::kApplied;
     }
     void connectorEnds()
     {
@@ -800,6 +807,30 @@ void TestFirewallPolicy::testDroppedHandOverHoldsDirectAttempt()
         QVERIFY(filter.mayStartAttempt(false));
         QVERIFY(!helper.ownership.hasOwner());
     }
+    // The held attempt ends the way the engine ends it: DISCONNECTED with an error, the firewall on.
+    // The engine still holds its rules (the hand-over never arrived): they stay.
+    {
+        FakeDnsLeakFilterHelper helper;
+        auto filter = helper.makeController();
+        connectProxied(helper, filter);
+        helper.dropNext = 3;
+        filter.onConnectRequest(false, false);
+        QVERIFY(!filter.mayConnect(false));
+        const quint64 pendingHandOver = helper.retries.last().first;
+        filter.onConnectState(CONNECT_STATE_DISCONNECTED, false, true);  // with error, firewall on
+        QVERIFY(helper.inPlace != DnsLeakFilter::kOff);
+        QCOMPARE(helper.ownership.owner(), DnsLeakFilterOwner::kProxiedSession);
+        QCOMPARE(filter.wanted(), DnsLeakFilter::kPermitWindscribeApps);
+        // The hand-over retry, now stale, does nothing.
+        const int sentBefore = helper.sent.size();
+        filter.onRetry(pendingHandOver);
+        QCOMPARE(helper.sent.size(), sentBefore);
+        QCOMPARE(helper.ownership.owner(), DnsLeakFilterOwner::kProxiedSession);
+        // Turning the firewall off then removes them, as for any filter kept after an error.
+        helper.dropNext = 0;
+        filter.onFirewallOff(CONNECT_STATE_DISCONNECTED);
+        QCOMPARE(helper.inPlace, DnsLeakFilter::kOff);
+    }
     // A connector whose session is connected keeps the handed-over filter until the session is over:
     // nothing removes the rules at CONNECTED.
     {
@@ -844,6 +875,52 @@ void TestFirewallPolicy::testEngineTrafficKeepsRequestProxy()
         QVERIFY(*update == changed);
         QVERIFY(!request.engineTrafficUpdate(changed).has_value());  // applied once
     }
+}
+
+void TestFirewallPolicy::testDirectConnectorNeedsItsOwnRules()
+{
+    using namespace firewall_policy;
+    FakeDnsLeakFilterHelper helper;
+    auto filter = helper.makeController();
+    filter.onConnectRequest(true, false);
+    filter.onConnectState(CONNECT_STATE_CONNECTING, true, false);
+    filter.onConnectState(CONNECT_STATE_CONNECTED, true, false);
+    // Switch to a direct profile; the hand-over is confirmed.
+    filter.onConnectState(CONNECT_STATE_CONNECTING, false, false);
+    filter.onConnectRequest(false, true);
+    filter.onConnectRequest(false, false);
+    QVERIFY(filter.mayStartAttempt(false));
+    const DnsLeakFilter engineRules = helper.inPlace;
+    QVERIFY(engineRules != DnsLeakFilter::kOff);
+
+    // The connector's own rules cannot be installed: the engine's (permissive for Windscribe and
+    // Throne) stay, and the connector must not start its tunnel.
+    const DnsLeakFilterResult result = helper.connectorStarts(true);
+    QVERIFY(!isDnsLeakFilterInstalled(result));
+    QCOMPARE(helper.inPlace, engineRules);
+    // When they do go in (or only a permit is missing), it may.
+    QVERIFY(isDnsLeakFilterInstalled(DnsLeakFilterResult::kApplied));
+    QVERIFY(isDnsLeakFilterInstalled(DnsLeakFilterResult::kIncomplete));
+}
+
+void TestFirewallPolicy::testLocationSwitchAppliesNewRequestProxy()
+{
+    const types::ProxySettings throne(PROXY_OPTION_HTTP, "127.0.0.1", 2080, "", "");
+    const types::ProxySettings none;
+    RequestProxySettings request;
+    // A direct session: the engine's traffic is direct.
+    QVERIFY(request.engineTrafficUpdate(none).has_value());
+    request.onRequest(none);
+    QVERIFY(!request.engineTrafficUpdate(none).has_value());
+    // Throne is turned on during the session: held until the session ends...
+    QVERIFY(!request.engineTrafficUpdate(throne).has_value());
+    // ...but an imported profile is picked now, without a disconnect in between. Accepting the
+    // request (connectClickImpl) applies its proxy to the firewall exception and the probes at once.
+    request.onRequest(throne);
+    const auto update = request.engineTrafficUpdate(throne);
+    QVERIFY(update.has_value());
+    QVERIFY(*update == throne);
+    QVERIFY(update->isProxyEnabled());  // direct probes of imported servers off
 }
 
 QTEST_MAIN(TestFirewallPolicy)

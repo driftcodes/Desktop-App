@@ -167,6 +167,7 @@ private:
     void funcRunOpenVPN();
 #ifdef Q_OS_WIN
     void funcFailAdapterSetup();
+    void funcFailDnsLeakFilter();
     void waitForAdapterReady(const boost::system::error_code &err);
 #endif
     void asyncConnectToManagementSocket();

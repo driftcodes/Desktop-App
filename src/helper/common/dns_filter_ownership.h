@@ -1,5 +1,23 @@
 #pragma once
 
+// Answer of the Windows enableDnsLeaksProtection / disableDnsLeaksProtection commands (sent as int).
+enum class DnsLeakFilterResult : int {
+    kFailed = 0,      // nothing changed: the rules in place before stay
+    kIncomplete = 1,  // blocks are in place, but a permit is missing or the adapters could not be read
+                      // (only local-network and last known resolvers covered); retried
+    kApplied = 2      // also: the request was not the owner's to make and was ignored (see
+                      // DnsLeakFilterOwnership); there is nothing of the caller's left to change
+};
+
+// Whether a connector's own DNS leak filter is in place after its enable request: the blocks are in
+// (kIncomplete included). A connector does not start its tunnel otherwise, since the rules left in
+// place may be a previous owner's (e.g. ones that let Windscribe and excluded apps reach the
+// adapter's DNS servers) or none at all.
+inline bool isDnsLeakFilterInstalled(DnsLeakFilterResult result)
+{
+    return result != DnsLeakFilterResult::kFailed;
+}
+
 // Who may change the Windows DNS leak filter. Two callers share it: the OpenVPN / WireGuard / IKEv2
 // connectors (each enables it when it starts and disables it when it ends) and the engine, which
 // holds it for a whole proxied session, reconnects included. Their lifetimes overlap: on a location

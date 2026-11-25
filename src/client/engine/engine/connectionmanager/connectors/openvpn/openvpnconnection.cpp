@@ -429,8 +429,12 @@ void OpenVPNConnection::run()
     const bool adapterCreated = helper_->createOpenVpnAdapter(useDCODriver);
     // A proxied session's DNS leak filter is owned by the engine (Engine::updateProxiedDnsLeakProtection),
     // which keeps it on from connect to final disconnect, including between OpenVPN processes.
+    // Without a proxy this connection installs its own and does not start without it: the rules left
+    // in place could be the engine's from a proxied session (which let Windscribe and excluded apps
+    // reach the adapters' DNS servers) or none.
+    bool isDnsLeakFilterInPlace = true;
     if (!isProxyForwarded()) {
-        helper_->enableDnsLeaksProtection();
+        isDnsLeakFilterInPlace = isDnsLeakFilterInstalled(helper_->enableDnsLeaksProtection());
     }
 #elif defined (Q_OS_LINUX)
     // NOTE: The emergency connect OpenVPN server is old-old and generates data packets not supported by the DCO driver.
@@ -446,6 +450,8 @@ void OpenVPNConnection::run()
         // Fail through the io_context instead of returning, so the teardown below still runs and
         // removes anything tapctl may have half-created.
         boost::asio::post(io_context_, boost::bind(&OpenVPNConnection::funcFailAdapterSetup, this));
+    } else if (!isDnsLeakFilterInPlace) {
+        boost::asio::post(io_context_, boost::bind(&OpenVPNConnection::funcFailDnsLeakFilter, this));
     } else {
         boost::asio::post(io_context_, boost::bind(&OpenVPNConnection::funcRunOpenVPN, this));
     }
@@ -534,6 +540,17 @@ void OpenVPNConnection::funcFailAdapterSetup()
 
     qCCritical(LOG_CONNECTION) << "Could not create the OpenVPN adapter";
     setCurrentStateAndEmitError(STATUS_DISCONNECTED, ConnectError::kAdapterNotInstalled);
+}
+
+void OpenVPNConnection::funcFailDnsLeakFilter()
+{
+    if (bStopThread_) {
+        setCurrentStateAndEmitDisconnected(STATUS_DISCONNECTED);
+        return;
+    }
+
+    qCCritical(LOG_CONNECTION) << "Could not install the DNS leak filter; not starting OpenVPN";
+    setCurrentStateAndEmitError(STATUS_DISCONNECTED, ConnectError::kDnsLeakProtectionFailed);
 }
 #endif
 

@@ -1077,6 +1077,10 @@ void Engine::connectClickImpl(const LocationID &locationId, const types::Connect
 {
     // The proxy settings this request is made with, kept until the session ends.
     requestProxySettings_.onRequest(ProxyServerController::instance().getCurrentProxySettings());
+    // A location switch never passes through DISCONNECTED: point the API, the firewall's proxy
+    // exception and imported-server probes at this request's proxy now (e.g. a direct session, then
+    // Throne turned on and an imported profile picked: no more direct lookups or pings of it).
+    applyEngineTrafficProxy();
     connectImpl(locationId, connectionSettings, pinnedNode);
 }
 

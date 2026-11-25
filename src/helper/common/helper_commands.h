@@ -23,15 +23,6 @@
 // exhaust memory in the privileged helper process.
 inline constexpr std::size_t kMaxHelperFrameSize = 4 * 1024 * 1024;
 
-// Answer of the Windows enableDnsLeaksProtection / disableDnsLeaksProtection commands (sent as int).
-enum class DnsLeakFilterResult : int {
-    kFailed = 0,      // nothing changed: the rules in place before stay
-    kIncomplete = 1,  // blocks are in place, but a permit is missing or the adapters could not be read
-                      // (only local-network and last known resolvers covered); retried
-    kApplied = 2      // also: the request was not the owner's to make and was ignored (see
-                      // DnsLeakFilterOwnership); there is nothing of the caller's left to change
-};
-
 enum class HelperCommand {
     // Common
     getHelperVersion,

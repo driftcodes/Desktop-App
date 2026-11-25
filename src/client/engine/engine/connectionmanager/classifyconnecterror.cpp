@@ -32,6 +32,10 @@ ConnectErrorClassification classifyConnectError(ConnectError err, bool isAutomat
         // over could pick a protocol that bypasses the configured proxy.
         case ConnectError::kRouteSetupFailure:
             return ConnectErrorClassification::ErrorAfterDisconnect;
+        // The connector's DNS leak filter could not be installed; another attempt or protocol would
+        // run without it as well.
+        case ConnectError::kDnsLeakProtectionFailed:
+            return ConnectErrorClassification::ErrorAfterDisconnect;
         case ConnectError::kVpnServiceSetupFailure:
         case ConnectError::kHostsFileNotWritable:
         case ConnectError::kOSServiceUnavailable:
@@ -49,7 +53,6 @@ ConnectErrorClassification classifyConnectError(ConnectError err, bool isAutomat
         case ConnectError::kLocalDnsServerNotAvailable:
         case ConnectError::kProxyUnreachable:
         case ConnectError::kProxyRequiresTcp:
-        case ConnectError::kDnsLeakProtectionFailed:
             return ConnectErrorClassification::Unknown;
     }
     return ConnectErrorClassification::Unknown;

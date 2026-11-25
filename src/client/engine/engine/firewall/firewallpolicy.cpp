@@ -98,13 +98,24 @@ void ProxiedDnsLeakFilter::onConnectState(CONNECT_STATE state, bool isProxySet, 
 {
     const bool isNewSession = state == CONNECT_STATE_CONNECTING && lastState_ == CONNECT_STATE_DISCONNECTED;
     lastState_ = state;
+    if (state == CONNECT_STATE_DISCONNECTED && wanted_ == DnsLeakFilter::kHandedOver &&
+        isEnginesDnsLeakFilter(confirmed_)) {
+        // The hand-over never reached the helper (the direct attempt was held for it): the engine
+        // still holds its rules. Treat them as such, so an error with the firewall on keeps them
+        // instead of removing the only DNS filter there is. The pending hand-over is dropped.
+        ++token_;
+        wanted_ = confirmed_;
+    }
     const DnsLeakFilterStep step = proxiedDnsLeakFilter(wanted_, state, isProxySet, keepAfterSession, isNewSession);
     if (state == CONNECT_STATE_CONNECTING && !isEnginesDnsLeakFilter(step.next)) {
         // A session without a proxy: its connector manages the filter itself. A pending retry (say, of
-        // a failed disable after the previous proxied session) must not turn off what it enables, and
-        // nothing confirmed before still holds: the connector removes the filter when it ends.
+        // a failed disable after the previous proxied session) must not turn off what it enables.
         ++token_;
-        confirmed_ = DnsLeakFilter::kOff;
+        if (step.next == DnsLeakFilter::kOff) {
+            // Nothing confirmed before still holds: the connector removes the filter when it ends.
+            confirmed_ = DnsLeakFilter::kOff;
+        }
+        // kHandedOver: the engine's rules stay confirmed until the helper confirms the hand-over.
     }
     apply(step);
 }
@@ -150,9 +161,9 @@ void ProxiedDnsLeakFilter::onConnectRequest(bool isProxied, bool isPreviousSessi
         claimForProxiedRequest(true);
     } else if (isEnginesDnsLeakFilter(wanted_) && !isPreviousSessionActive) {
         // Hand-over without removal: the connector replaces the rules when it starts. The helper
-        // ignores this engine's retries once the connector holds the filter.
+        // ignores this engine's retries once the connector holds the filter. confirmed_ keeps naming
+        // the engine's rules until the helper confirms the hand-over.
         ++token_;
-        confirmed_ = DnsLeakFilter::kOff;
         apply({DnsLeakFilter::kHandedOver, true});
     }
 }

@@ -99,13 +99,16 @@ Emergency Connect is unchanged and never uses the proxy.
     lets the previous session keep it until that session has ended, then hands it to its own OpenVPN
     (also after a proxied session ended with an error). The hand-over leaves the rules in place until
     that OpenVPN replaces them, so there is no moment without a filter in either direction, and the
-    direct connection starts only once the helper has confirmed the hand-over.
+    direct connection starts only once the helper has confirmed the hand-over. If it never does, the
+    attempt stops with the DNS leak protection error and the previous rules stay (with the firewall on,
+    until you turn it off). A direct OpenVPN that cannot install its own rules does not start either.
   - **The proxy setting is taken when you pick a location.** Everything that request leads to (the
     connection after the previous one has ended, a retry after fetching server credentials, the
     filter's hand-over) uses the proxy settings it was made with, and so do Windscribe's own requests
     meanwhile (the API, including the server-credential fetch before a redial, the firewall's proxy
     exception, probes of imported servers). Turning the proxy off or changing its port during a
-    connection takes effect for all of these when that connection ends; it does not turn a profile you
+    connection takes effect for all of these when that connection ends or you pick a location again
+    (picking one applies its setting to these at once, also without disconnecting first); it does not turn a profile you
     picked with Throne into a direct connection, and Windscribe's API requests do not go direct either.
     Pick the location again to use the new setting.
   - Removing an app from the Exclusive exclusions takes away its DNS permit too; if that rebuild fails,
