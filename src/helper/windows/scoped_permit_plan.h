@@ -100,6 +100,29 @@ inline std::vector<DnsRule> dnsFilterRules(const std::set<types::IpAddress> &ser
     return rules;
 }
 
+struct DnsRulePlan
+{
+    bool canApply;    // false: keep the rules in place
+    bool isFallback;  // the adapters could not be read; rules from what is known instead
+    std::vector<DnsRule> rules;
+};
+
+// Rules for the current adapters. If they cannot be read: while not connected under a proxy, the
+// local-network ranges plus the last resolvers known are still blocked (so a first enable never ends
+// up with no block at all); while connected, the rules in place stay.
+inline DnsRulePlan planDnsRules(bool serversKnown, const std::set<types::IpAddress> &servers,
+                                const std::set<types::IpAddress> &lastKnownServers,
+                                const std::set<types::IpAddress> &excluded, bool permitApps, size_t permittedAppsCount)
+{
+    if (serversKnown) {
+        return {true, false, dnsFilterRules(servers, excluded, permitApps, permittedAppsCount)};
+    }
+    if (permitApps) {
+        return {true, true, dnsFilterRules(lastKnownServers, excluded, true, permittedAppsCount)};
+    }
+    return {false, false, {}};
+}
+
 // The WFP operations replaceDnsRules needs; DnsFirewall implements it with one transaction.
 class DnsRuleStore
 {
@@ -120,11 +143,11 @@ enum class ReplaceResult {
 };
 
 // Replaces the rules in one transaction. The old rules are removed only if every new block can be
-// added and the transaction commits; otherwise it is aborted and the old rules stay. serversKnown is
-// false when the adapters' DNS servers could not be read (an error, unlike a network with none).
-inline ReplaceResult replaceDnsRules(DnsRuleStore &store, bool serversKnown, const std::vector<DnsRule> &rules)
+// added and the transaction commits; otherwise it is aborted and the old rules stay. canApply is
+// false when there is nothing reliable to apply (see planDnsRules).
+inline ReplaceResult replaceDnsRules(DnsRuleStore &store, bool canApply, const std::vector<DnsRule> &rules)
 {
-    if (!serversKnown || !store.begin()) {
+    if (!canApply || !store.begin()) {
         return ReplaceResult::kKeptPrevious;
     }
     if (!store.removeAll() || !store.ensureSublayer()) {
@@ -147,5 +170,44 @@ inline ReplaceResult replaceDnsRules(DnsRuleStore &store, bool serversKnown, con
     }
     return isEveryPermitAdded ? ReplaceResult::kApplied : ReplaceResult::kAppliedWithoutSomePermits;
 }
+
+// Whether the filter must be rebuilt for the adapters' current DNS servers: a resolver can change
+// without the network changing (DHCP renewal, a manual DNS change on the same Wi-Fi), so the helper
+// compares the list itself. Nothing to do when the adapters could not be read.
+inline bool dnsServersChanged(bool serversKnown, const std::set<types::IpAddress> &current,
+                              const std::set<types::IpAddress> &applied)
+{
+    return serversKnown && current != applied;
+}
+
+// The programs the filter's permits are meant for, against those of the rules actually in place. A
+// failed rebuild keeps the old rules, old permits included, so a request for the same list again
+// still needs a rebuild until one succeeds.
+template <typename Apps>
+class PermittedAppsTracker
+{
+public:
+    // Returns true when the rules in place do not match the requested programs.
+    bool request(const Apps &apps)
+    {
+        requested_ = apps;
+        return needsRebuild();
+    }
+    bool needsRebuild() const { return !isApplied_ || !(requested_ == applied_); }
+    // Rules for the requested programs were committed.
+    void onApplied()
+    {
+        applied_ = requested_;
+        isApplied_ = true;
+    }
+    // Rules without permits (or none) are in place; any program list differs from them.
+    void onNoPermitsInPlace() { isApplied_ = false; }
+    const Apps &requested() const { return requested_; }
+
+private:
+    Apps requested_ {};
+    Apps applied_ {};
+    bool isApplied_ = false;
+};
 
 } // namespace scoped_permits

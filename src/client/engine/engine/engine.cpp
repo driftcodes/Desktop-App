@@ -736,11 +736,19 @@ void Engine::initPart2()
     testVPNTunnel_ = new TestVPNTunnel(this);
     connect(testVPNTunnel_, &TestVPNTunnel::testsFinished, connectionManager_, &ConnectionManager::onTunnelTestResult);
 #ifdef Q_OS_WIN
+    proxiedDnsLeakFilter_ = std::make_unique<firewall_policy::ProxiedDnsLeakFilter>(
+        [this](firewall_policy::DnsLeakFilter filter) { return sendProxiedDnsLeakFilter(filter); },
+        [this](quint64 token, int delayMs) {
+            QTimer::singleShot(delayMs, this, [this, token]() {
+                if (proxiedDnsLeakFilter_ && !isCleanupFinished_) {
+                    proxiedDnsLeakFilter_->onRetry(token);
+                }
+            });
+        });
     // A DNS leak filter kept after a proxied session ended goes off with the firewall.
     connect(this, &Engine::firewallStateChanged, this, [this](bool isEnabled) {
         if (!isEnabled) {
-            applyProxiedDnsLeakFilter(firewall_policy::proxiedDnsLeakFilterAfterFirewallOff(
-                proxiedDnsLeakFilter_, connectStateController_->currentState()));
+            proxiedDnsLeakFilter_->onFirewallOff(connectStateController_->currentState());
         }
     });
 #endif
@@ -958,8 +966,9 @@ void Engine::cleanupImpl(bool isUpdating)
     }
 #ifdef Q_OS_WIN
     // The proxied DNS leak filter is not persistent; don't leave it behind the app either.
-    applyProxiedDnsLeakFilter({firewall_policy::DnsLeakFilter::kOff,
-                               proxiedDnsLeakFilter_ != firewall_policy::DnsLeakFilter::kOff});
+    if (proxiedDnsLeakFilter_) {
+        proxiedDnsLeakFilter_->onShutdown();
+    }
 #endif
 
     // turn off split tunneling
@@ -1126,6 +1135,17 @@ void Engine::connectClickImpl(const LocationID &locationId, const types::Connect
             emit firewallStateChanged(true);
         }
     }
+#ifdef Q_OS_WIN
+    // With a proxy set, connecting starts only once the helper has confirmed the DNS leak filter's
+    // blocks: otherwise a router acting as DNS stays reachable through the LAN permit. The filter keeps
+    // being retried in the background.
+    if (proxiedDnsLeakFilter_ && !proxiedDnsLeakFilter_->mayConnect()) {
+        qCCritical(LOG_CONNECTION) << "DNS leak protection could not be set up, abort connection";
+        connectStateController_->setDisconnectedState(DISCONNECTED_WITH_ERROR, ConnectError::kDnsLeakProtectionFailed);
+        myIpManager_->getIP(1);
+        return;
+    }
+#endif
     doConnect(true);
 }
 
@@ -2459,7 +2479,9 @@ void Engine::onNetworkChange(const types::NetworkInterface &networkInterface)
     // A different network can bring a different resolver; rebuild the proxied DNS leak filter for it
     // (also while reconnecting, when the connect state stays CONNECTING, and while it is kept after an
     // error). Local-network resolvers are blocked by range anyway while not connected.
-    applyProxiedDnsLeakFilter(firewall_policy::proxiedDnsLeakFilterOnNetworkChange(proxiedDnsLeakFilter_));
+    if (proxiedDnsLeakFilter_) {
+        proxiedDnsLeakFilter_->onNetworkChange();
+    }
 #endif
     if (!networkInterface.networkOrSsid.isEmpty()) {
         api_responses::PortMap portMap(WSNet::instance()->apiResourcersManager()->portMap());
@@ -3210,7 +3232,7 @@ void Engine::enableDohSettings()
 
 void Engine::updateProxiedDnsLeakProtection(CONNECT_STATE state, DISCONNECT_REASON reason)
 {
-    if (!helper_) {
+    if (!helper_ || !proxiedDnsLeakFilter_) {
         return;
     }
     // Ended by an error (e.g. Throne stopped, so the proxy is unreachable) or sleep with the firewall
@@ -3219,45 +3241,33 @@ void Engine::updateProxiedDnsLeakProtection(CONNECT_STATE state, DISCONNECT_REAS
                                   firewallController_ && firewallController_->firewallActualState();
     // While not connected, Windscribe's own programs keep DNS (wsnet resolves the API and imported
     // hostnames itself, then goes through the proxy) and so do Exclusive-mode excluded apps such as
-    // Throne; every other program is blocked from the adapters' DNS servers, a router in a private
-    // range included, which the firewall's LAN permit alone would let through.
-    applyProxiedDnsLeakFilter(firewall_policy::proxiedDnsLeakFilter(
-        proxiedDnsLeakFilter_, state, ProxyServerController::instance().getCurrentProxySettings().isProxyEnabled(),
-        keepAfterSession));
+    // Throne; every other program is blocked from the adapters' resolvers and all local-network ones.
+    proxiedDnsLeakFilter_->onConnectState(state, ProxyServerController::instance().getCurrentProxySettings().isProxyEnabled(),
+                                          keepAfterSession);
 }
 
-void Engine::applyProxiedDnsLeakFilter(const firewall_policy::DnsLeakFilterStep &step)
-{
-    // proxiedDnsLeakFilter_ is the filter wanted for the current state; sendProxiedDnsLeakFilter()
-    // retries until the helper confirms it (the helper keeps the previous rules when it cannot apply).
-    proxiedDnsLeakFilter_ = step.next;
-    if (step.apply) {
-        sendProxiedDnsLeakFilter();
-    }
-}
-
-void Engine::sendProxiedDnsLeakFilter()
+firewall_policy::DnsLeakFilterSendResult Engine::sendProxiedDnsLeakFilter(firewall_policy::DnsLeakFilter filter)
 {
     using firewall_policy::DnsLeakFilter;
+    using firewall_policy::DnsLeakFilterSendResult;
     if (!helper_ || isCleanupFinished_) {
-        return;
+        return DnsLeakFilterSendResult::kFailed;
     }
-    const DnsLeakFilter wanted = proxiedDnsLeakFilter_;
-    const bool isApplied = wanted == DnsLeakFilter::kOff
-                               ? helper_->disableDnsLeaksProtection()
-                               : helper_->enableDnsLeaksProtection(wanted == DnsLeakFilter::kPermitWindscribeApps);
-    if (isApplied) {
-        return;
+    const DnsLeakFilterResult result = filter == DnsLeakFilter::kOff
+                                           ? helper_->disableDnsLeaksProtection()
+                                           : helper_->enableDnsLeaksProtection(filter == DnsLeakFilter::kPermitWindscribeApps);
+    switch (result) {
+    case DnsLeakFilterResult::kApplied:
+        return DnsLeakFilterSendResult::kApplied;
+    case DnsLeakFilterResult::kIncomplete:
+        qCWarning(LOG_BASIC) << "DNS leak filter: blocks in place but incomplete; retrying";
+        return DnsLeakFilterSendResult::kIncomplete;
+    case DnsLeakFilterResult::kFailed:
+        break;
     }
-    qCCritical(LOG_BASIC) << "DNS leak filter: the helper could not apply" << static_cast<int>(wanted)
-                          << "(previous rules kept); retrying in" << kDnsLeakFilterRetryMs << "ms";
-    if (!isDnsLeakFilterRetryScheduled_) {
-        isDnsLeakFilterRetryScheduled_ = true;
-        QTimer::singleShot(kDnsLeakFilterRetryMs, this, [this]() {
-            isDnsLeakFilterRetryScheduled_ = false;
-            sendProxiedDnsLeakFilter();
-        });
-    }
+    qCCritical(LOG_BASIC) << "DNS leak filter: the helper could not apply" << static_cast<int>(filter)
+                          << "(the previous rules stay); retrying";
+    return DnsLeakFilterSendResult::kFailed;
 }
 
 void Engine::sendVpnSessionStatusToHelper(const AdapterGatewayInfo &defaultAdapter)

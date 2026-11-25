@@ -1,6 +1,7 @@
 #pragma once
 
 #include <functional>
+#include <QtGlobal>
 #include <QSet>
 #include <QString>
 #include "types/enums.h"
@@ -49,5 +50,50 @@ DnsLeakFilterStep proxiedDnsLeakFilter(DnsLeakFilter current, CONNECT_STATE stat
 DnsLeakFilterStep proxiedDnsLeakFilterOnNetworkChange(DnsLeakFilter current);
 // The firewall was turned off: a filter kept after a session ends with it.
 DnsLeakFilterStep proxiedDnsLeakFilterAfterFirewallOff(DnsLeakFilter current, CONNECT_STATE state);
+
+// What the helper reported for a change (mirrors DnsLeakFilterResult in helper_commands.h).
+enum class DnsLeakFilterSendResult {
+    kFailed,      // nothing changed: the rules in place before stay
+    kIncomplete,  // blocks in place, something else missing; retried
+    kApplied
+};
+
+// Drives the proxied DNS leak filter for the engine: sends the filter each state wants, knows whether
+// a block is confirmed in place, and retries until the helper confirms the wanted filter. A retry
+// carries a token; any later send or a change of owner (a session the engine does not handle, whose
+// connector manages the filter itself) invalidates it, so a late retry never undoes newer rules.
+class ProxiedDnsLeakFilter
+{
+public:
+    using Send = std::function<DnsLeakFilterSendResult(DnsLeakFilter)>;
+    using ScheduleRetry = std::function<void(quint64 token, int delayMs)>;
+    static constexpr int kFirstRetryMs = 2000;
+    static constexpr int kMaxRetryMs = 60000;
+
+    ProxiedDnsLeakFilter(Send send, ScheduleRetry scheduleRetry);
+
+    void onConnectState(CONNECT_STATE state, bool isProxySet, bool keepAfterSession);
+    void onNetworkChange();
+    void onFirewallOff(CONNECT_STATE state);
+    void onShutdown();
+    void onRetry(quint64 token);
+
+    DnsLeakFilter wanted() const { return wanted_; }
+    bool isBlockConfirmed() const { return isBlockConfirmed_; }
+    // Whether a proxied connection may start: the filter is not the engine's, or the helper has
+    // confirmed a block. If not, it asks the helper once more first.
+    bool mayConnect();
+
+private:
+    void apply(const DnsLeakFilterStep &step);
+    void send();
+
+    Send send_;
+    ScheduleRetry scheduleRetry_;
+    DnsLeakFilter wanted_ = DnsLeakFilter::kOff;
+    bool isBlockConfirmed_ = false;
+    quint64 token_ = 0;
+    int retryDelayMs_ = kFirstRetryMs;
+};
 
 } // namespace firewall_policy

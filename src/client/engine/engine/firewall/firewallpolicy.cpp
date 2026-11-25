@@ -79,4 +79,88 @@ DnsLeakFilterStep proxiedDnsLeakFilterAfterFirewallOff(DnsLeakFilter current, CO
     return {current, false};
 }
 
+ProxiedDnsLeakFilter::ProxiedDnsLeakFilter(Send send, ScheduleRetry scheduleRetry)
+    : send_(std::move(send)), scheduleRetry_(std::move(scheduleRetry))
+{
+}
+
+void ProxiedDnsLeakFilter::onConnectState(CONNECT_STATE state, bool isProxySet, bool keepAfterSession)
+{
+    const DnsLeakFilterStep step = proxiedDnsLeakFilter(wanted_, state, isProxySet, keepAfterSession);
+    if (state == CONNECT_STATE_CONNECTING && step.next == DnsLeakFilter::kOff) {
+        // A session without a proxy: its connector manages the filter itself. A pending retry (say, of
+        // a failed disable after the previous proxied session) must not turn off what it enables.
+        ++token_;
+    }
+    apply(step);
+}
+
+void ProxiedDnsLeakFilter::onNetworkChange()
+{
+    apply(proxiedDnsLeakFilterOnNetworkChange(wanted_));
+}
+
+void ProxiedDnsLeakFilter::onFirewallOff(CONNECT_STATE state)
+{
+    apply(proxiedDnsLeakFilterAfterFirewallOff(wanted_, state));
+}
+
+void ProxiedDnsLeakFilter::onShutdown()
+{
+    apply({DnsLeakFilter::kOff, wanted_ != DnsLeakFilter::kOff});
+    ++token_;  // nothing is retried after shutdown
+}
+
+void ProxiedDnsLeakFilter::onRetry(quint64 token)
+{
+    if (token == token_) {
+        send();
+    }
+}
+
+bool ProxiedDnsLeakFilter::mayConnect()
+{
+    if (wanted_ == DnsLeakFilter::kOff || isBlockConfirmed_) {
+        return true;
+    }
+    send();
+    return isBlockConfirmed_;
+}
+
+void ProxiedDnsLeakFilter::apply(const DnsLeakFilterStep &step)
+{
+    if (!step.apply) {
+        wanted_ = step.next;
+        return;
+    }
+    wanted_ = step.next;
+    retryDelayMs_ = kFirstRetryMs;
+    send();
+}
+
+void ProxiedDnsLeakFilter::send()
+{
+    ++token_;  // supersedes any retry already scheduled
+    const DnsLeakFilterSendResult result = send_(wanted_);
+    if (wanted_ == DnsLeakFilter::kOff) {
+        if (result == DnsLeakFilterSendResult::kApplied) {
+            isBlockConfirmed_ = false;
+            retryDelayMs_ = kFirstRetryMs;
+            return;
+        }
+    } else {
+        // Blocks are in place either way unless it failed; a failure keeps the previous rules, which
+        // hold a block only if one was confirmed before.
+        if (result != DnsLeakFilterSendResult::kFailed) {
+            isBlockConfirmed_ = true;
+        }
+        if (result == DnsLeakFilterSendResult::kApplied) {
+            retryDelayMs_ = kFirstRetryMs;
+            return;
+        }
+    }
+    scheduleRetry_(token_, retryDelayMs_);
+    retryDelayMs_ = qMin(retryDelayMs_ * 2, kMaxRetryMs);
+}
+
 } // namespace firewall_policy

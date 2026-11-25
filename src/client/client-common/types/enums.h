@@ -75,6 +75,7 @@ enum class ConnectError {
     kProxyUnreachable = 20,             // the configured HTTP/SOCKS proxy did not accept a connection; terminal
     kProxyRequiresTcp = 21,             // a proxy is configured but the attempt is not OpenVPN TCP; terminal
     kRouteSetupFailure = 22,            // OpenVPN connected but could not install its routes; terminal
+    kDnsLeakProtectionFailed = 23,      // Windows, proxy set: the DNS leak filter could not be installed; terminal
 };
 
 enum PROXY_SHARING_TYPE {

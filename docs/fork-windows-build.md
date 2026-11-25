@@ -68,17 +68,27 @@ Emergency Connect is unchanged and never uses the proxy.
   - **While not connected** (connecting, reconnecting, or kept after an error) it blocks DNS to every
     local-network address (10.x, 172.16-31.x, 192.168.x, 169.254.x and the IPv6 equivalents), not just
     the router it knows about, so a router on a Wi-Fi network you join in the middle of a reconnect is
-    blocked before the app has even seen it. Public DNS servers on your adapters are blocked too, and
-    the filter is rebuilt whenever Windows reports a network change. Only Windscribe's own programs
+    blocked before the app has even seen it. Public DNS servers on your adapters are blocked too. Only Windscribe's own programs
     and the apps excluded in Exclusive split tunneling (Throne) may still use DNS there. A custom
     Connected DNS address is not exempt in this state either.
   - **While connected** it blocks your adapters' DNS servers for every program, except a custom
     Connected DNS you chose, as in the official app.
+  - **When a DNS server changes**, on a new network or on the same Wi-Fi (a DHCP renewal or a manual
+    DNS change), the helper notices it (it watches where Windows keeps each adapter's DNS settings,
+    and checks every 2 seconds as a backup) and rebuilds the filter. This also applies to the filter
+    of connections without a proxy.
   - Other LAN traffic (printers, file shares, the router's web page) is not affected.
-  - **If Windows cannot apply a change** (it cannot read the adapters, or a block cannot be added), the
-    helper keeps the rules that were in place, reports the failure, and the app logs it and tries
-    again every 2 seconds. A missing permit for Windscribe's own programs fails closed: the blocks go
-    in, Windscribe may be unable to look up hostnames, and the app retries.
+  - **If Windows cannot apply a change**, the helper keeps the rules that were in place and reports
+    the failure; the app and the helper keep retrying (the app backs off from 2 seconds to a minute).
+    If the adapters cannot be read while not connected, the local-network ranges and the DNS servers
+    known from before are still blocked. A missing permit for Windscribe's own programs fails closed:
+    the blocks go in, Windscribe may be unable to look up hostnames until a retry succeeds.
+  - **No connection without the filter.** With a proxy set, Windscribe does not start connecting until
+    the helper has confirmed the filter's blocks. If it cannot, you get "Windscribe could not set up its
+    DNS leak protection, so it did not connect"; it keeps trying in the background, so connecting again
+    a moment later usually works.
+  - Removing an app from the Exclusive exclusions takes away its DNS permit too; if that rebuild fails,
+    the helper retries until the permit is gone.
 
   Limits:
   - A program that sends DNS to some other address or port (DNS-over-HTTPS to a public resolver, for
@@ -86,8 +96,9 @@ Emergency Connect is unchanged and never uses the proxy.
   - After your own Disconnect the filter is off, as in the official app. In Always On mode the firewall
     stays on, and a DNS server in a private range is then reachable by every program through the LAN
     permit, while public DNS servers stay limited to Windscribe's programs.
-  - A public DNS server handed out by a network joined during a reconnect is covered once Windows
-    reports the change and the filter is rebuilt (local-network ones are covered from the start).
+  - A public DNS server handed out by a network joined during a reconnect is covered once the helper
+    sees the change, normally within 2 seconds (local-network ones are covered from the start). While
+    connected, a new DNS server is likewise covered within about 2 seconds.
   - A program that needs DNS to a server on your LAN (for example a local Pi-hole you query directly)
     cannot reach it while a proxied session is not connected.
   - Throne has to resolve its own server's name itself, or use an IP address: lookups it hands to the
@@ -154,6 +165,9 @@ adapter** with Wireshark (filter: `udp.port == 53 || tcp.port == 53`). Find your
    there; that is expected.
 3. While it shows Connecting, join a different Wi-Fi network (or a phone hotspot) whose router has
    another address, and query that router the same way: it must not appear on the capture either.
+   Then, while connected, change the Wi-Fi adapter's DNS server by hand (Settings > Network > Wi-Fi >
+   your network > DNS server assignment) to another address on your LAN, wait 3 seconds, and query
+   it: it must not appear on the capture.
 4. Stop Throne while connected. The app should end with "could not reach the proxy" and the firewall
    should stay on; the lookups must still not appear on the capture. Start Throne and connect again.
 5. Disconnect and reconnect from the app, and check the same while it connects.

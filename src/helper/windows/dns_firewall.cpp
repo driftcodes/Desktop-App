@@ -22,9 +22,15 @@ DnsFirewall::DnsFirewall(FwpmWrapper &fwmpWrapper) : fwmpWrapper_(fwmpWrapper), 
     UuidFromString((RPC_WSTR)UUID_LAYER_DNS, &subLayerGUID_);
 }
 
+DnsFirewall::~DnsFirewall()
+{
+    stopMonitor();
+}
+
 void DnsFirewall::release()
 {
     disable();
+    stopMonitor();
     WSACleanup();
 }
 
@@ -105,6 +111,7 @@ private:
 bool DnsFirewall::disable()
 {
     std::lock_guard<std::recursive_mutex> guard(mutex_);
+    bWanted_ = false;
     HANDLE hEngine = fwmpWrapper_.getHandleAndLock();
 
     bool isRemoved = false;
@@ -130,7 +137,9 @@ bool DnsFirewall::disable()
 
     if (isRemoved) {
         bCurrentState_ = false;
-        bPermitApps_ = false;
+        isDirty_ = false;
+        appliedServers_.clear();
+        permittedApps_.onNoPermitsInPlace();
         spdlog::debug("DnsFirewall::disable(), all filters deleted");
     } else {
         spdlog::error("DnsFirewall::disable() failed; the DNS leak filter stays as it was");
@@ -138,44 +147,58 @@ bool DnsFirewall::disable()
     return isRemoved;
 }
 
-bool DnsFirewall::enable(bool permitApps)
+DnsLeakFilterResult DnsFirewall::enable(bool permitApps)
 {
     std::lock_guard<std::recursive_mutex> guard(mutex_);
+    startMonitor();
     return enableImpl(permitApps);
 }
 
-bool DnsFirewall::enableImpl(bool permitApps)
+DnsLeakFilterResult DnsFirewall::enableImpl(bool permitApps)
 {
+    bWanted_ = true;
+    bWantedPermitApps_ = permitApps;
+
     AppsIds permittedApps;
     if (permitApps) {
-        permittedApps.addFrom(windscribeAppsIds_);
-        permittedApps.addFrom(excludedAppsIds_);
+        permittedApps = permittedApps_.requested();
         if (permittedApps.count() == 0) {
             spdlog::error("DnsFirewall::enable(), no permitted programs known; blocking DNS for every program");
         }
     }
     std::set<types::IpAddress> dnsServers;
     const bool serversKnown = getDnsServers(dnsServers);
-    const auto rules = scoped_permits::dnsFilterRules(dnsServers, excludeIps_, permitApps, permittedApps.count());
+    const auto plan = scoped_permits::planDnsRules(serversKnown, dnsServers, appliedServers_, excludeIps_, permitApps,
+                                                   permittedApps.count());
 
     HANDLE hEngine = fwmpWrapper_.getHandleAndLock();
     WfpDnsRuleStore store(fwmpWrapper_, hEngine, subLayerGUID_, permittedApps);
     // Old rules out and new rules in within one transaction, aborted (keeping the old rules) unless
     // every block is in: re-enabling never leaves a moment without the block.
-    const auto result = scoped_permits::replaceDnsRules(store, serversKnown, rules);
+    const auto result = scoped_permits::replaceDnsRules(store, plan.canApply, plan.rules);
     fwmpWrapper_.unlock();
 
     if (result == scoped_permits::ReplaceResult::kKeptPrevious) {
         spdlog::error("DnsFirewall::enable() failed (adapters readable: {}); the previous rules stay", serversKnown);
-        return false;
+        isDirty_ = true;
+        return DnsLeakFilterResult::kFailed;
     }
     bCurrentState_ = true;
-    bPermitApps_ = permitApps;
-    if (result == scoped_permits::ReplaceResult::kAppliedWithoutSomePermits) {
-        spdlog::error("DnsFirewall::enable(), blocks in place but a permit is missing");
-        return false;
+    if (!plan.isFallback) {
+        appliedServers_ = dnsServers;
     }
-    return true;
+    if (permitApps && result == scoped_permits::ReplaceResult::kApplied) {
+        permittedApps_.onApplied();
+    } else {
+        permittedApps_.onNoPermitsInPlace();
+    }
+    isDirty_ = plan.isFallback || result != scoped_permits::ReplaceResult::kApplied;
+    if (isDirty_) {
+        spdlog::error("DnsFirewall::enable(), blocks in place but incomplete (adapters unreadable: {}); will retry",
+                      plan.isFallback);
+        return DnsLeakFilterResult::kIncomplete;
+    }
+    return DnsLeakFilterResult::kApplied;
 }
 
 void DnsFirewall::setExcludeIps(const std::vector<std::wstring>& ips)
@@ -193,24 +216,122 @@ void DnsFirewall::setExcludeIps(const std::vector<std::wstring>& ips)
 void DnsFirewall::setWindscribeAppsIds(const AppsIds &appsIds)
 {
     std::lock_guard<std::recursive_mutex> guard(mutex_);
-    if (windscribeAppsIds_ == appsIds) {
-        return;
-    }
     windscribeAppsIds_ = appsIds;
-    if (bCurrentState_ && bPermitApps_) {
-        enableImpl(true);
-    }
+    updatePermittedApps();
 }
 
 void DnsFirewall::setExcludedAppsIds(const AppsIds &appsIds)
 {
     std::lock_guard<std::recursive_mutex> guard(mutex_);
-    if (excludedAppsIds_ == appsIds) {
+    excludedAppsIds_ = appsIds;
+    updatePermittedApps();
+}
+
+void DnsFirewall::updatePermittedApps()
+{
+    AppsIds permitted = windscribeAppsIds_;
+    permitted.addFrom(excludedAppsIds_);
+    // Compared with the programs of the rules in place, not with the last request: after a failed
+    // rebuild the old permits are still there, so the same list sent again must still rebuild.
+    if (permittedApps_.request(permitted) && bWanted_ && bWantedPermitApps_) {
+        enableImpl(true);  // on failure isDirty_ is set and the monitor retries
+    }
+}
+
+void DnsFirewall::startMonitor()
+{
+    if (monitor_.joinable()) {
         return;
     }
-    excludedAppsIds_ = appsIds;
-    if (bCurrentState_ && bPermitApps_) {
-        enableImpl(true);
+    stopMonitorEvent_ = CreateEvent(NULL, TRUE, FALSE, NULL);
+    if (stopMonitorEvent_ == NULL) {
+        spdlog::error("DnsFirewall: CreateEvent failed: {}", ::GetLastError());
+        return;
+    }
+    monitor_ = std::thread(&DnsFirewall::monitorThread, this);
+}
+
+void DnsFirewall::stopMonitor()
+{
+    if (!monitor_.joinable()) {
+        return;
+    }
+    SetEvent(stopMonitorEvent_);
+    monitor_.join();
+    CloseHandle(stopMonitorEvent_);
+    stopMonitorEvent_ = nullptr;
+}
+
+void DnsFirewall::monitorThread()
+{
+    // Windows keeps each adapter's DNS servers (static and DHCP) under these keys; a change there is
+    // the earliest sign of a new resolver, on the same network or another. A short poll backs it up
+    // and retries a rebuild that failed.
+    const wchar_t *paths[2] = {L"SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters\\Interfaces",
+                               L"SYSTEM\\CurrentControlSet\\Services\\Tcpip6\\Parameters\\Interfaces"};
+    HKEY keys[2] = {nullptr, nullptr};
+    HANDLE events[3] = {stopMonitorEvent_, CreateEvent(NULL, FALSE, FALSE, NULL), CreateEvent(NULL, FALSE, FALSE, NULL)};
+    const auto arm = [&](int i) {
+        if (keys[i] != nullptr && events[i + 1] != NULL) {
+            const LONG ret = RegNotifyChangeKeyValue(keys[i], TRUE, REG_NOTIFY_CHANGE_NAME | REG_NOTIFY_CHANGE_LAST_SET,
+                                                     events[i + 1], TRUE);
+            if (ret != ERROR_SUCCESS) {
+                spdlog::error("DnsFirewall: RegNotifyChangeKeyValue failed: {}", ret);
+            }
+        }
+    };
+    for (int i = 0; i < 2; ++i) {
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, paths[i], 0, KEY_NOTIFY, &keys[i]) != ERROR_SUCCESS) {
+            keys[i] = nullptr;
+            spdlog::error(L"DnsFirewall: could not watch {}; polling only", paths[i]);
+        }
+        arm(i);
+    }
+    const DWORD count = (events[1] != NULL && events[2] != NULL) ? 3 : 1;
+
+    constexpr DWORD kPollMs = 2000;
+    while (true) {
+        const DWORD wait = WaitForMultipleObjects(count, events, FALSE, kPollMs);
+        if (wait == WAIT_OBJECT_0) {
+            break;
+        }
+        if (wait == WAIT_OBJECT_0 + 1) {
+            arm(0);
+        } else if (wait == WAIT_OBJECT_0 + 2) {
+            arm(1);
+        } else if (wait == WAIT_FAILED) {
+            spdlog::error("DnsFirewall: WaitForMultipleObjects failed: {}", ::GetLastError());
+            if (WaitForSingleObject(stopMonitorEvent_, kPollMs) == WAIT_OBJECT_0) {
+                break;
+            }
+        }
+        checkForChanges();
+    }
+
+    for (int i = 0; i < 2; ++i) {
+        if (keys[i] != nullptr) {
+            RegCloseKey(keys[i]);
+        }
+        if (events[i + 1] != NULL) {
+            CloseHandle(events[i + 1]);
+        }
+    }
+}
+
+void DnsFirewall::checkForChanges()
+{
+    std::lock_guard<std::recursive_mutex> guard(mutex_);
+    if (!bWanted_) {
+        return;
+    }
+    std::set<types::IpAddress> servers;
+    const bool serversKnown = getDnsServers(servers);
+    const bool serversChanged = scoped_permits::dnsServersChanged(serversKnown, servers, appliedServers_);
+    const bool appsChanged = bWantedPermitApps_ && permittedApps_.needsRebuild();
+    if (isDirty_ || serversChanged || appsChanged) {
+        spdlog::info("DnsFirewall: rebuilding (retry: {}, DNS servers changed: {}, programs changed: {})", isDirty_,
+                     serversChanged, appsChanged);
+        enableImpl(bWantedPermitApps_);
     }
 }
 

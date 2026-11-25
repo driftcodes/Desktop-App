@@ -15,5 +15,8 @@ private slots:
     void testProxiedDnsLeakFilterSpansReconnect();
     void testDnsLeakFilterRebuiltOnNetworkChangeWhileConnecting();
     void testDnsLeakFilterUntouchedWithoutProxy();
+    void testFirstConnectHeldUntilBlockConfirmed();
+    void testStaleRetryDoesNotUndoUnproxiedSession();
+    void testRetryBacksOffAndStopsOnSuccess();
     void testDnsLeakFilterKeptAfterErrorUntilFirewallOff();
 };

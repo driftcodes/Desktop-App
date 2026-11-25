@@ -177,7 +177,7 @@ void testFailedReplacementKeepsWorkingRouterBlock()
 
     const auto replacement = scoped_permits::dnsFilterRules({ip("192.168.1.1"), ip("1.1.1.1")}, {}, true, 2);
 
-    // The adapters could not be read: nothing is touched.
+    // Nothing reliable to apply (adapters unreadable while connected): nothing is touched.
     VERIFY(scoped_permits::replaceDnsRules(store, false, replacement) == ReplaceResult::kKeptPrevious);
     VERIFY(store.committed.size() == routerA.size());
     VERIFY(covers(store.committed, ip("192.168.1.1"), false));
@@ -219,6 +219,80 @@ void testFailedReplacementKeepsWorkingRouterBlock()
     VERIFY(store.committed.empty());
 }
 
+void testFirstEnableWithUnreadableAdaptersStillBlocks()
+{
+    using scoped_permits::ReplaceResult;
+    // Empty rule store (first connection) and the adapters cannot be read.
+    FakeStore store;
+    const auto plan = scoped_permits::planDnsRules(false, {}, {}, {}, true, 2);
+    VERIFY(plan.canApply);
+    VERIFY(plan.isFallback);
+    VERIFY(scoped_permits::replaceDnsRules(store, plan.canApply, plan.rules) == ReplaceResult::kApplied);
+    // The Wi-Fi router is blocked for other programs all the same.
+    VERIFY(covers(store.committed, ip("192.168.1.1"), false));
+    VERIFY(covers(store.committed, ip("10.0.0.138"), false));
+    VERIFY(covers(store.committed, ip("192.168.1.1"), true));
+
+    // With resolvers known from before, those stay blocked too (Cloudflare on the adapter).
+    const auto withLastKnown = scoped_permits::planDnsRules(false, {}, {ip("1.1.1.1")}, {}, true, 2);
+    VERIFY(covers(withLastKnown.rules, ip("1.1.1.1"), false));
+
+    // While connected, unreadable adapters keep the rules in place instead.
+    VERIFY(!scoped_permits::planDnsRules(false, {}, {ip("192.168.1.1")}, {}, false, 0).canApply);
+
+    // Empty rule store and a block that cannot be added: still nothing, and the caller is told.
+    FakeStore failing;
+    failing.failAddAt = 0;
+    VERIFY(scoped_permits::replaceDnsRules(failing, plan.canApply, plan.rules) == ReplaceResult::kKeptPrevious);
+    VERIFY(failing.committed.empty());
+}
+
+void testResolverChangeOnSameWifiWhileConnected()
+{
+    using scoped_permits::ReplaceResult;
+    // Connected; the rules block router A (the connected rules list resolvers one by one).
+    FakeStore store;
+    const std::set<IpAddress> before = {ip("192.168.1.1")};
+    VERIFY(scoped_permits::replaceDnsRules(store, true, scoped_permits::dnsFilterRules(before, {}, false, 0)) ==
+           ReplaceResult::kApplied);
+    VERIFY(!covers(store.committed, ip("192.168.1.53"), false));
+
+    // DHCP renewal on the same Wi-Fi hands out 192.168.1.53 instead: same adapter, same network.
+    const std::set<IpAddress> after = {ip("192.168.1.53")};
+    VERIFY(scoped_permits::dnsServersChanged(true, after, before));
+    VERIFY(scoped_permits::replaceDnsRules(store, true, scoped_permits::dnsFilterRules(after, {}, false, 0)) ==
+           ReplaceResult::kApplied);
+    VERIFY(covers(store.committed, ip("192.168.1.53"), false));
+
+    // Nothing to do when nothing changed, or when the adapters cannot be read.
+    VERIFY(!scoped_permits::dnsServersChanged(true, after, after));
+    VERIFY(!scoped_permits::dnsServersChanged(false, {}, after));
+}
+
+void testRemovedExclusionRetriedAfterFailedRebuild()
+{
+    using Apps = std::vector<std::wstring>;
+    scoped_permits::PermittedAppsTracker<Apps> tracker;
+    const Apps withEdge = {L"windscribe.exe", L"throne.exe", L"msedge.exe"};
+    const Apps withoutEdge = {L"windscribe.exe", L"throne.exe"};
+
+    VERIFY(tracker.request(withEdge));  // nothing applied yet
+    tracker.onApplied();
+    VERIFY(!tracker.request(withEdge));  // same list, rules match
+
+    // Edge removed from the exclusions; the rebuild fails, so the old permit (with Edge) stays.
+    VERIFY(tracker.request(withoutEdge));
+    // The identical list sent again must still rebuild.
+    VERIFY(tracker.request(withoutEdge));
+    VERIFY(tracker.needsRebuild());
+    tracker.onApplied();
+    VERIFY(!tracker.request(withoutEdge));
+
+    // Rules without permits in place (connected): any list differs from them.
+    tracker.onNoPermitsInPlace();
+    VERIFY(tracker.needsRebuild());
+}
+
 } // namespace
 
 int main()
@@ -228,6 +302,9 @@ int main()
     testNotConnectedRulesCoverWifiRouterAndCloudflare();
     testCustomDnsExclusionOnlyWhileConnected();
     testFailedReplacementKeepsWorkingRouterBlock();
+    testFirstEnableWithUnreadableAdaptersStillBlocks();
+    testResolverChangeOnSameWifiWhileConnected();
+    testRemovedExclusionRetriedAfterFailedRebuild();
     if (g_failures == 0) {
         printf("All scoped permit tests passed.\n");
     }

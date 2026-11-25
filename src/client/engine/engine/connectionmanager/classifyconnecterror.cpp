@@ -49,6 +49,7 @@ ConnectErrorClassification classifyConnectError(ConnectError err, bool isAutomat
         case ConnectError::kLocalDnsServerNotAvailable:
         case ConnectError::kProxyUnreachable:
         case ConnectError::kProxyRequiresTcp:
+        case ConnectError::kDnsLeakProtectionFailed:
             return ConnectErrorClassification::Unknown;
     }
     return ConnectErrorClassification::Unknown;

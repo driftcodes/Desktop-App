@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <optional>
+#include <memory>
 
 #include <QElapsedTimer>
 #include <QObject>
@@ -356,11 +357,8 @@ private:
     // from the start of connecting to the final disconnect, including the gaps between OpenVPN
     // processes, instead of following each OpenVPN process.
     void updateProxiedDnsLeakProtection(CONNECT_STATE state, DISCONNECT_REASON reason);
-    void applyProxiedDnsLeakFilter(const firewall_policy::DnsLeakFilterStep &step);
-    void sendProxiedDnsLeakFilter();
-    static constexpr int kDnsLeakFilterRetryMs = 2000;
-    bool isDnsLeakFilterRetryScheduled_ = false;
-    firewall_policy::DnsLeakFilter proxiedDnsLeakFilter_ = firewall_policy::DnsLeakFilter::kOff;
+    firewall_policy::DnsLeakFilterSendResult sendProxiedDnsLeakFilter(firewall_policy::DnsLeakFilter filter);
+    std::unique_ptr<firewall_policy::ProxiedDnsLeakFilter> proxiedDnsLeakFilter_;
 #endif
 
     types::EngineSettings engineSettings_;

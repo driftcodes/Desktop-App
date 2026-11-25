@@ -263,4 +263,130 @@ void TestFirewallPolicy::testDnsLeakFilterKeptAfterErrorUntilFirewallOff()
     QVERIFY(!step.apply);
 }
 
+namespace {
+
+// The helper as the controller sees it: scripted answers, a log of what was sent, and the retries
+// scheduled (token, delay) for the test to fire whenever it likes.
+struct FakeDnsLeakFilterHelper
+{
+    QList<firewall_policy::DnsLeakFilterSendResult> answers;  // consumed in order; then kApplied
+    QList<firewall_policy::DnsLeakFilter> sent;
+    QList<QPair<quint64, int>> retries;
+    // What the real helper's filter is: the last filter applied, by the engine or by a connector.
+    firewall_policy::DnsLeakFilter inPlace = firewall_policy::DnsLeakFilter::kOff;
+
+    firewall_policy::ProxiedDnsLeakFilter makeController()
+    {
+        return firewall_policy::ProxiedDnsLeakFilter(
+            [this](firewall_policy::DnsLeakFilter f) {
+                sent << f;
+                const auto answer = answers.isEmpty() ? firewall_policy::DnsLeakFilterSendResult::kApplied
+                                                      : answers.takeFirst();
+                if (answer != firewall_policy::DnsLeakFilterSendResult::kFailed) {
+                    inPlace = f;
+                }
+                return answer;
+            },
+            [this](quint64 token, int delayMs) { retries << qMakePair(token, delayMs); });
+    }
+};
+
+} // namespace
+
+void TestFirewallPolicy::testFirstConnectHeldUntilBlockConfirmed()
+{
+    using namespace firewall_policy;
+    FakeDnsLeakFilterHelper helper;
+    // Empty rule store and the helper cannot install anything: two failures (state change, then the
+    // check before connecting).
+    helper.answers = {DnsLeakFilterSendResult::kFailed, DnsLeakFilterSendResult::kFailed};
+    auto filter = helper.makeController();
+    filter.onConnectState(CONNECT_STATE_CONNECTING, true, false);
+    QCOMPARE(filter.wanted(), DnsLeakFilter::kPermitWindscribeApps);
+    QVERIFY(!filter.isBlockConfirmed());
+    QCOMPARE(helper.inPlace, DnsLeakFilter::kOff);  // no block at all
+    QVERIFY(!filter.mayConnect());                  // the connection is held
+    QCOMPARE(helper.sent.size(), 2);                // it asked once more first
+    QVERIFY(!helper.retries.isEmpty());             // and keeps retrying
+
+    // The retry gets the blocks in: the next connect may go ahead.
+    filter.onRetry(helper.retries.last().first);
+    QVERIFY(filter.isBlockConfirmed());
+    QVERIFY(filter.mayConnect());
+
+    // Blocks in but a permit missing: blocks are what matters for connecting.
+    FakeDnsLeakFilterHelper partial;
+    partial.answers = {DnsLeakFilterSendResult::kIncomplete};
+    auto filter2 = partial.makeController();
+    filter2.onConnectState(CONNECT_STATE_CONNECTING, true, false);
+    QVERIFY(filter2.mayConnect());
+    QCOMPARE(partial.sent.size(), 1);
+    QCOMPARE(partial.retries.size(), 1);  // the rest is still retried
+
+    // Once confirmed, a later failure keeps the confirmed blocks in place (the helper keeps them).
+    FakeDnsLeakFilterHelper later;
+    auto filter3 = later.makeController();
+    filter3.onConnectState(CONNECT_STATE_CONNECTING, true, false);
+    later.answers = {DnsLeakFilterSendResult::kFailed};
+    filter3.onConnectState(CONNECT_STATE_CONNECTED, true, false);
+    QVERIFY(filter3.isBlockConfirmed());
+    QCOMPARE(later.inPlace, DnsLeakFilter::kPermitWindscribeApps);
+
+    // Without a proxy nothing is held.
+    FakeDnsLeakFilterHelper none;
+    auto filter4 = none.makeController();
+    filter4.onConnectState(CONNECT_STATE_CONNECTING, false, false);
+    QVERIFY(filter4.mayConnect());
+    QVERIFY(none.sent.isEmpty());
+}
+
+void TestFirewallPolicy::testStaleRetryDoesNotUndoUnproxiedSession()
+{
+    using namespace firewall_policy;
+    FakeDnsLeakFilterHelper helper;
+    auto filter = helper.makeController();
+    // A proxied session; at its end the helper fails to remove the filter once.
+    filter.onConnectState(CONNECT_STATE_CONNECTING, true, false);
+    filter.onConnectState(CONNECT_STATE_CONNECTED, true, false);
+    filter.onConnectState(CONNECT_STATE_DISCONNECTING, true, false);
+    helper.answers = {DnsLeakFilterSendResult::kFailed};
+    filter.onConnectState(CONNECT_STATE_DISCONNECTED, true, false);
+    QCOMPARE(filter.wanted(), DnsLeakFilter::kOff);
+    QCOMPARE(helper.inPlace, DnsLeakFilter::kPermitWindscribeApps);  // the disable failed
+    QCOMPARE(helper.retries.size(), 1);
+    const quint64 staleToken = helper.retries.last().first;
+
+    // The proxy is turned off and an ordinary OpenVPN session starts; its connector enables the filter.
+    filter.onConnectState(CONNECT_STATE_CONNECTING, false, false);
+    helper.inPlace = DnsLeakFilter::kBlockAll;
+    const int sentBefore = helper.sent.size();
+
+    // The old retry fires late: it must not turn the new session's filter off.
+    filter.onRetry(staleToken);
+    QCOMPARE(helper.sent.size(), sentBefore);
+    QCOMPARE(helper.inPlace, DnsLeakFilter::kBlockAll);
+}
+
+void TestFirewallPolicy::testRetryBacksOffAndStopsOnSuccess()
+{
+    using namespace firewall_policy;
+    FakeDnsLeakFilterHelper helper;
+    helper.answers = {DnsLeakFilterSendResult::kFailed, DnsLeakFilterSendResult::kFailed};
+    auto filter = helper.makeController();
+    filter.onConnectState(CONNECT_STATE_CONNECTING, true, false);
+    QCOMPARE(helper.retries.size(), 1);
+    QCOMPARE(helper.retries[0].second, ProxiedDnsLeakFilter::kFirstRetryMs);
+    filter.onRetry(helper.retries[0].first);
+    QCOMPARE(helper.retries.size(), 2);
+    QCOMPARE(helper.retries[1].second, 2 * ProxiedDnsLeakFilter::kFirstRetryMs);
+
+    // A newer send succeeds before the retry fires: the retry is void and nothing more is scheduled.
+    filter.onConnectState(CONNECT_STATE_CONNECTED, true, false);
+    const int sentBefore = helper.sent.size();
+    filter.onRetry(helper.retries[1].first);
+    QCOMPARE(helper.sent.size(), sentBefore);
+    QCOMPARE(helper.retries.size(), 2);
+    QCOMPARE(helper.inPlace, DnsLeakFilter::kBlockAll);
+}
+
 QTEST_MAIN(TestFirewallPolicy)

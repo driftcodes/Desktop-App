@@ -365,20 +365,20 @@ bool Helper_win::deleteWhitelistPorts()
     return success;
 }
 
-bool Helper_win::enableDnsLeaksProtection(bool permitWindscribeApps)
+DnsLeakFilterResult Helper_win::enableDnsLeaksProtection(bool permitWindscribeApps)
 {
     auto result = sendCommand(HelperCommand::enableDnsLeaksProtection, toStdVector(customDnsIp_), permitWindscribeApps);
-    bool isApplied = false;
-    deserializeAnswer(result, isApplied);
-    return isApplied;
+    int answer = static_cast<int>(DnsLeakFilterResult::kFailed);
+    deserializeAnswer(result, answer);
+    return static_cast<DnsLeakFilterResult>(answer);
 }
 
-bool Helper_win::disableDnsLeaksProtection()
+DnsLeakFilterResult Helper_win::disableDnsLeaksProtection()
 {
     auto result = sendCommand(HelperCommand::disableDnsLeaksProtection);
-    bool isApplied = false;
-    deserializeAnswer(result, isApplied);
-    return isApplied;
+    int answer = static_cast<int>(DnsLeakFilterResult::kFailed);
+    deserializeAnswer(result, answer);
+    return static_cast<DnsLeakFilterResult>(answer);
 }
 
 void Helper_win::reinstallWanIkev2()
