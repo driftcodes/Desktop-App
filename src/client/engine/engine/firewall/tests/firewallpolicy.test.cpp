@@ -1004,6 +1004,45 @@ void TestFirewallPolicy::testLostHandOverReplyReclaimsFilter()
     QVERIFY(helper2.ownership.hasOwner() && helper2.ownership.owner() == DnsLeakFilterOwner::kProxiedSession);
 }
 
+void TestFirewallPolicy::testSecondFailedHandOverBeforeReclaimKeepsRules()
+{
+    using namespace firewall_policy;
+    FakeDnsLeakFilterHelper helper;
+    auto filter = helper.makeController();
+    filter.onConnectRequest(true, false);
+    filter.onConnectState(CONNECT_STATE_CONNECTING, true, false);
+    filter.onConnectState(CONNECT_STATE_CONNECTED, true, false);
+    QVERIFY(helper.ownership.hasOwner() && helper.ownership.owner() == DnsLeakFilterOwner::kProxiedSession);
+
+    // Switch to a direct profile. The helper never gets the hand-over, the one more try, nor the
+    // reclaim after the error.
+    filter.onConnectState(CONNECT_STATE_CONNECTING, false, false);
+    filter.onConnectRequest(false, true);
+    helper.dropNext = 3;
+    filter.onConnectRequest(false, false);
+    QVERIFY(!filter.mayConnect(false));
+    filter.onConnectState(CONNECT_STATE_DISCONNECTED, false, true);  // error, firewall on
+    QVERIFY(!filter.isBlockConfirmed());                             // the reclaim is pending
+    QVERIFY(helper.inPlace != DnsLeakFilter::kOff);
+
+    // The user tries the direct profile again before the reclaim was confirmed; that hand-over is lost
+    // too, and the attempt ends with an error again.
+    helper.dropNext = 2;
+    filter.onConnectState(CONNECT_STATE_CONNECTING, false, false);
+    QCOMPARE(filter.wanted(), DnsLeakFilter::kHandedOver);
+    QVERIFY(!filter.mayConnect(false));
+    filter.onConnectState(CONNECT_STATE_DISCONNECTED, false, true);
+
+    // The rules are still there (as the not-connected ones kept after an error), and the engine has
+    // claimed them back.
+    QVERIFY(helper.inPlace != DnsLeakFilter::kOff);
+    QVERIFY(helper.ownership.hasOwner() && helper.ownership.owner() == DnsLeakFilterOwner::kProxiedSession);
+    QVERIFY(isEnginesDnsLeakFilter(filter.wanted()));
+    QVERIFY(filter.isBlockConfirmed());
+    // The filter was never off at any point.
+    QVERIFY(!helper.history.contains(DnsLeakFilter::kOff));
+}
+
 void TestFirewallPolicy::testIgnoredConnectorRequestIsNotInstalled()
 {
     using namespace firewall_policy;

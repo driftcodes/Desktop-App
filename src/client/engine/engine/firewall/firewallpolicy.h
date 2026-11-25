@@ -131,6 +131,11 @@ private:
     ScheduleRetry scheduleRetry_;
     DnsLeakFilter wanted_ = DnsLeakFilter::kOff;
     DnsLeakFilter confirmed_ = DnsLeakFilter::kOff;
+    // The engine's rules the helper may still have in place, held by the engine: set whenever the
+    // engine sends its rules (answered or not), cleared only when the helper confirms letting go. An
+    // unconfirmed hand-over falls back to these and reclaims them, however many failed hand-overs
+    // and reclaims came in between.
+    DnsLeakFilter heldRules_ = DnsLeakFilter::kOff;
     CONNECT_STATE lastState_ = CONNECT_STATE_DISCONNECTED;
     quint64 token_ = 0;
     int retryDelayMs_ = kFirstRetryMs;

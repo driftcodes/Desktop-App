@@ -100,12 +100,13 @@ void ProxiedDnsLeakFilter::onConnectState(CONNECT_STATE state, bool isProxySet, 
     lastState_ = state;
     bool isReclaim = false;
     if (state == CONNECT_STATE_DISCONNECTED && wanted_ == DnsLeakFilter::kHandedOver &&
-        isEnginesDnsLeakFilter(confirmed_)) {
+        isEnginesDnsLeakFilter(heldRules_)) {
         // The hand-over was not confirmed (the direct attempt was held for it): the engine's rules are
-        // still the ones in place. Take them back, so an error with the firewall on keeps them instead
-        // of removing the only DNS filter there is. The pending hand-over is dropped.
+        // still the ones in place, as far as the engine knows. Take them back, so an error with the
+        // firewall on keeps them instead of removing the only DNS filter there is. The pending
+        // hand-over is dropped.
         ++token_;
-        wanted_ = confirmed_;
+        wanted_ = heldRules_;
         isReclaim = true;
     }
     DnsLeakFilterStep step = proxiedDnsLeakFilter(wanted_, state, isProxySet, keepAfterSession, isNewSession);
@@ -231,10 +232,14 @@ void ProxiedDnsLeakFilter::apply(const DnsLeakFilterStep &step)
 void ProxiedDnsLeakFilter::send()
 {
     ++token_;  // supersedes any retry already scheduled
+    if (isEnginesDnsLeakFilter(wanted_)) {
+        heldRules_ = wanted_;  // the helper may take the claim even if its answer is lost
+    }
     const DnsLeakFilterSendResult result = send_(wanted_);
     if (!isEnginesDnsLeakFilter(wanted_)) {
         if (result == DnsLeakFilterSendResult::kApplied) {
             confirmed_ = wanted_;  // kOff, or kHandedOver: the helper let go
+            heldRules_ = DnsLeakFilter::kOff;
             retryDelayMs_ = kFirstRetryMs;
             return;
         }
