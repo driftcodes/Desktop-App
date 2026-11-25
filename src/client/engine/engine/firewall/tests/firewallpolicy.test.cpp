@@ -272,6 +272,9 @@ namespace {
 struct FakeDnsLeakFilterHelper
 {
     QList<firewall_policy::DnsLeakFilterSendResult> answers;  // consumed in order; then kApplied
+    // Requests lost before the helper acts on them (it never saw them; the engine gets no answer).
+    // A kFailed answer otherwise means the helper acted but could not change the rules.
+    int dropNext = 0;
     QList<firewall_policy::DnsLeakFilter> sent;
     QList<QPair<quint64, int>> retries;
     // The rules the real helper has in place, from the engine's requests or a connector's, with the
@@ -294,6 +297,10 @@ struct FakeDnsLeakFilterHelper
             [this](firewall_policy::DnsLeakFilter f) {
                 using firewall_policy::DnsLeakFilterSendResult;
                 sent << f;
+                if (dropNext > 0) {
+                    --dropNext;
+                    return DnsLeakFilterSendResult::kFailed;
+                }
                 const auto answer = answers.isEmpty() ? DnsLeakFilterSendResult::kApplied : answers.takeFirst();
                 if (!firewall_policy::isEnginesDnsLeakFilter(f)) {
                     if (!ownership.acceptDisable(DnsLeakFilterOwner::kProxiedSession)) {
@@ -536,9 +543,9 @@ void TestFirewallPolicy::testNewUnproxiedSessionAfterErrorTakesOverFilter()
     helper.connectorStarts();
     QCOMPARE(helper.inPlace, DnsLeakFilter::kBlockAll);
     QCOMPARE(helper.ownership.owner(), DnsLeakFilterOwner::kConnection);
-    // Connected: the engine's clean-up of leftover rules is ignored, the connector's stay.
+    // Connected: the engine leaves the connector's rules alone.
     filter.onConnectState(CONNECT_STATE_CONNECTED, false, false);
-    QCOMPARE(filter.wanted(), DnsLeakFilter::kOff);
+    QCOMPARE(filter.wanted(), DnsLeakFilter::kHandedOver);
     QCOMPARE(helper.inPlace, DnsLeakFilter::kBlockAll);
     filter.onConnectState(CONNECT_STATE_DISCONNECTING, false, false);
     helper.connectorEnds();
@@ -744,6 +751,99 @@ void TestFirewallPolicy::testRequestKeepsProxyChosenAtSelection()
     // Once the session is over, the next request takes the preference as it is then.
     request.onSessionEnded();
     QVERIFY(!request.get(none).isProxyEnabled());
+}
+
+void TestFirewallPolicy::testDroppedHandOverHoldsDirectAttempt()
+{
+    using namespace firewall_policy;
+    const auto connectProxied = [](FakeDnsLeakFilterHelper &helper, ProxiedDnsLeakFilter &filter) {
+        filter.onConnectRequest(true, false);
+        filter.onConnectState(CONNECT_STATE_CONNECTING, true, false);
+        QVERIFY(filter.mayStartAttempt(true));
+        filter.onConnectState(CONNECT_STATE_CONNECTED, true, false);
+        QCOMPARE(helper.inPlace, DnsLeakFilter::kBlockAll);
+        // The proxy is turned off and another profile picked; the old session is torn down.
+        filter.onConnectState(CONNECT_STATE_CONNECTING, false, false);
+        filter.onConnectRequest(false, true);
+    };
+    // The hand-over is lost once: the check before the direct attempt sends it again.
+    {
+        FakeDnsLeakFilterHelper helper;
+        auto filter = helper.makeController();
+        connectProxied(helper, filter);
+        helper.dropNext = 1;
+        filter.onConnectRequest(false, false);
+        QCOMPARE(helper.ownership.owner(), DnsLeakFilterOwner::kProxiedSession);  // the helper never saw it
+        QVERIFY(filter.mayConnect(false));
+        QVERIFY(!helper.ownership.hasOwner());
+        QVERIFY(filter.mayStartAttempt(false));
+        helper.connectorStarts();
+        QCOMPARE(helper.ownership.owner(), DnsLeakFilterOwner::kConnection);
+        QCOMPARE(helper.inPlace, DnsLeakFilter::kBlockAll);
+    }
+    // The helper keeps not getting it: the direct attempt is held, the old rules stay, and nothing
+    // removes them.
+    {
+        FakeDnsLeakFilterHelper helper;
+        auto filter = helper.makeController();
+        connectProxied(helper, filter);
+        const DnsLeakFilter rulesBefore = helper.inPlace;
+        helper.dropNext = 3;
+        filter.onConnectRequest(false, false);
+        QVERIFY(!filter.mayConnect(false));
+        QVERIFY(!filter.mayStartAttempt(false));
+        QCOMPARE(helper.ownership.owner(), DnsLeakFilterOwner::kProxiedSession);
+        QCOMPARE(helper.inPlace, rulesBefore);
+        QVERIFY(helper.inPlace != DnsLeakFilter::kOff);
+        // A retry gets through later; then the attempt may go ahead.
+        filter.onRetry(helper.retries.last().first);
+        QVERIFY(filter.mayStartAttempt(false));
+        QVERIFY(!helper.ownership.hasOwner());
+    }
+    // A connector whose session is connected keeps the handed-over filter until the session is over:
+    // nothing removes the rules at CONNECTED.
+    {
+        FakeDnsLeakFilterHelper helper;
+        auto filter = helper.makeController();
+        connectProxied(helper, filter);
+        filter.onConnectRequest(false, false);
+        QVERIFY(filter.mayConnect(false));
+        const DnsLeakFilter left = helper.inPlace;
+        filter.onConnectState(CONNECT_STATE_CONNECTED, false, false);  // before the connector claimed
+        QCOMPARE(helper.inPlace, left);
+        QVERIFY(helper.inPlace != DnsLeakFilter::kOff);
+    }
+}
+
+void TestFirewallPolicy::testEngineTrafficKeepsRequestProxy()
+{
+    const types::ProxySettings throne(PROXY_OPTION_HTTP, "127.0.0.1", 2080, "", "");
+    const types::ProxySettings throneOtherPort(PROXY_OPTION_HTTP, "127.0.0.1", 3080, "", "");
+    const types::ProxySettings none;
+
+    for (const types::ProxySettings &changed : {none, throneOtherPort}) {
+        RequestProxySettings request;
+        // Start-up: the engine's own traffic follows the preference.
+        auto update = request.engineTrafficUpdate(throne);
+        QVERIFY(update.has_value());
+        QVERIFY(*update == throne);
+
+        // A connection through Throne; while it reconnects (a credential refresh pending), the
+        // preference is turned off or its port changed.
+        request.onRequest(throne);
+        QVERIFY(!request.engineTrafficUpdate(changed).has_value());  // API keeps 127.0.0.1:2080
+        // The credential request (restoreWsnetProxySettings) and the VPN redial (doConnect) both use
+        // the request's proxy.
+        QVERIFY(request.get(changed) == throne);
+        QCOMPARE(request.get(changed).getPort(), static_cast<uint>(2080));
+
+        // The session ends: now the changed preference applies.
+        request.onSessionEnded();
+        update = request.engineTrafficUpdate(changed);
+        QVERIFY(update.has_value());
+        QVERIFY(*update == changed);
+        QVERIFY(!request.engineTrafficUpdate(changed).has_value());  // applied once
+    }
 }
 
 QTEST_MAIN(TestFirewallPolicy)

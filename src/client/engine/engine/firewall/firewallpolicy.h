@@ -38,8 +38,9 @@ void leaveConnection(FirewallController &controller, FirewallExceptions &excepti
 // firewall stays on keeps it (keepAfterSession) until the firewall goes off or the next session.
 // kHandedOver: the engine let go of the filter for a connection without a proxy but left its rules in
 // place; that connection's connector replaces them in one step when it starts (no moment without a
-// filter). The engine removes them once the session is connected or over, which the helper ignores if
-// the connector holds the filter by then.
+// filter). The direct attempt starts only once the helper has confirmed the hand-over (otherwise the
+// helper would still ignore the connector). The engine removes the rules when the session is over,
+// which the helper ignores if the connector holds the filter by then.
 enum class DnsLeakFilter { kOff, kPermitWindscribeApps, kBlockAll, kHandedOver };
 
 // The engine holds the filter (kPermitWindscribeApps or kBlockAll).
@@ -96,7 +97,7 @@ public:
     // The filter the helper last confirmed for the engine (blocks in place); kOff when none, or when
     // the filter has not been the engine's since (a connector without a proxy managed it).
     DnsLeakFilter confirmed() const { return confirmed_; }
-    bool isBlockConfirmed() const { return confirmed_ != DnsLeakFilter::kOff; }
+    bool isBlockConfirmed() const { return isEnginesDnsLeakFilter(confirmed_); }
     // The engine accepted a connection request (a connect, a location switch, a redial it starts);
     // isProxied: whether that request uses the proxy, isPreviousSessionActive: whether an earlier
     // session is still being torn down. A proxied request claims the filter right away, before the

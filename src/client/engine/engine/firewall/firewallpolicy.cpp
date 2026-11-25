@@ -53,10 +53,8 @@ DnsLeakFilterStep proxiedDnsLeakFilter(DnsLeakFilter current, CONNECT_STATE stat
         if (current == DnsLeakFilter::kPermitWindscribeApps) {
             return {DnsLeakFilter::kBlockAll, true};
         }
-        if (current == DnsLeakFilter::kHandedOver) {
-            // The connector has taken the rules over by now; removing what is left is ignored then.
-            return {DnsLeakFilter::kOff, true};
-        }
+        // kHandedOver stays until the session is over: if the connector has not taken the rules over,
+        // they are the only filter there is.
         return {current, false};
     case CONNECT_STATE_DISCONNECTING:
         // The tunnel is going away; a reconnect may follow before the next CONNECTING.
@@ -162,7 +160,9 @@ void ProxiedDnsLeakFilter::onConnectRequest(bool isProxied, bool isPreviousSessi
 bool ProxiedDnsLeakFilter::mayConnect(bool isProxied)
 {
     claimForProxiedRequest(isProxied);
-    if (!isEnginesDnsLeakFilter(wanted_) || confirmed_ == wanted_) {
+    // kOff: not the engine's. Otherwise the helper must have confirmed it: the engine's rules, or the
+    // hand-over (the connector's rules would be ignored while the helper still sees the engine).
+    if (wanted_ == DnsLeakFilter::kOff || confirmed_ == wanted_) {
         return true;
     }
     send();
@@ -198,7 +198,7 @@ void ProxiedDnsLeakFilter::send()
     const DnsLeakFilterSendResult result = send_(wanted_);
     if (!isEnginesDnsLeakFilter(wanted_)) {
         if (result == DnsLeakFilterSendResult::kApplied) {
-            confirmed_ = DnsLeakFilter::kOff;
+            confirmed_ = wanted_;  // kOff, or kHandedOver: the helper let go
             retryDelayMs_ = kFirstRetryMs;
             return;
         }

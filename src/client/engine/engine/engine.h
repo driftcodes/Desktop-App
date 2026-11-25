@@ -352,6 +352,9 @@ private slots:
 private:
     void initPart2();
     void updateProxySettings();
+    // Points the engine's own traffic (API, firewall proxy exception, imported-server probes) at
+    // requestProxySettings() when that changed.
+    void applyEngineTrafficProxy();
     // The body of connectClickImpl; re-entered for the same request (after the previous session has
     // ended, after a node evacuation) without taking the proxy settings again.
     void connectImpl(const LocationID &locationId, const types::ConnectionSettings &connectionSettings, const QPair<QString, QString> &pinnedNode);

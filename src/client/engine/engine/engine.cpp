@@ -2379,7 +2379,7 @@ void Engine::onEmergencyConnectionDisconnected(DISCONNECT_REASON reason)
     qCDebug(LOG_BASIC) << "Engine::onEmergencyConnectionDisconnected(), reason =" << reason;
 
     // enable proxy
-    const auto &proxySettings = ProxyServerController::instance().getCurrentProxySettings();
+    const types::ProxySettings proxySettings = requestProxySettings();
     WSNet::instance()->httpNetworkManager()->setProxySettings(proxySettings.curlAddress().toStdString(), proxySettings.getUsername().toStdString(), proxySettings.getPassword().toStdString());
     DnsServersConfiguration::instance().setDisconnectedState();
     WSNet::instance()->dnsResolver()->setDnsServers(DnsServersConfiguration::instance().getCurrentDnsServers());
@@ -2928,7 +2928,8 @@ void Engine::updateWsnetConnectivityState()
 
 void Engine::restoreWsnetProxySettings()
 {
-    const auto &proxySettings = ProxyServerController::instance().getCurrentProxySettings();
+    // The request's proxy while one is in progress (reconnects, the credential fetch before a redial).
+    const types::ProxySettings proxySettings = requestProxySettings();
     WSNet::instance()->httpNetworkManager()->setProxySettings(proxySettings.curlAddress().toStdString(), proxySettings.getUsername().toStdString(), proxySettings.getPassword().toStdString());
 }
 
@@ -3219,6 +3220,8 @@ void Engine::onConnectStateChanged(CONNECT_STATE state, DISCONNECT_REASON reason
     // A reconnect or location switch never passes through here; the request's settings last until then.
     if (state == CONNECT_STATE_DISCONNECTED) {
         requestProxySettings_.onSessionEnded();
+        // A preference changed during the session now applies to the engine's own traffic.
+        applyEngineTrafficProxy();
     }
 
 #ifdef Q_OS_MACOS
@@ -3244,17 +3247,24 @@ void Engine::onConnectStateChanged(CONNECT_STATE state, DISCONNECT_REASON reason
 
 void Engine::updateProxySettings()
 {
-    if (ProxyServerController::instance().updateProxySettings(engineSettings_.proxySettings())) {
-        const auto &proxySettings = ProxyServerController::instance().getCurrentProxySettings();
-        WSNet::instance()->httpNetworkManager()->setProxySettings(proxySettings.curlAddress().toStdString(), proxySettings.getUsername().toStdString(), proxySettings.getPassword().toStdString());
-        firewallExceptions_.setProxyIP(proxySettings);
+    ProxyServerController::instance().updateProxySettings(engineSettings_.proxySettings());
+    applyEngineTrafficProxy();
+}
+
+void Engine::applyEngineTrafficProxy()
+{
+    // While a request is in progress the engine's own traffic keeps that request's proxy (see
+    // RequestProxySettings); a preference change reaches it when the session ends.
+    const auto update = requestProxySettings_.engineTrafficUpdate(ProxyServerController::instance().getCurrentProxySettings());
+    if (update) {
+        WSNet::instance()->httpNetworkManager()->setProxySettings(update->curlAddress().toStdString(), update->getUsername().toStdString(), update->getPassword().toStdString());
+        firewallExceptions_.setProxyIP(*update);
         updateFirewallSettings();
     }
     // With a proxy set, imported VPN endpoints are reached only through it: no direct DNS lookups,
     // pings or firewall exceptions for them before connecting.
     if (locationsModel_) {
-        locationsModel_->setCustomConfigDirectProbesAllowed(
-            !ProxyServerController::instance().getCurrentProxySettings().isProxyEnabled());
+        locationsModel_->setCustomConfigDirectProbesAllowed(!requestProxySettings().isProxyEnabled());
     }
 }
 
