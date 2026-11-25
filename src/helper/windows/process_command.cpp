@@ -326,13 +326,18 @@ std::string firewallOn(const std::string &pars)
     ips.erase(std::remove_if(ips.begin(), ips.end(), isInvalid), ips.end());
     windscribeOnlyIps.erase(std::remove_if(windscribeOnlyIps.begin(), windscribeOnlyIps.end(), isInvalid), windscribeOnlyIps.end());
 
+    if (!windscribeOnlyIps.empty()) {
+        // The scoped permits need Windscribe's programs; look again if none were found at start.
+        SplitTunneling::instance().redetectWindscribeAppsIfMissing();
+    }
     bool prevStatus = FirewallFilter::instance().currentStatus();
-    FirewallFilter::instance().on(connectingIp.c_str(), ips, windscribeOnlyIps, bAllowLanTraffic, bIsCustomConfig);
+    const bool isComplete = FirewallFilter::instance().on(connectingIp.c_str(), ips, windscribeOnlyIps, bAllowLanTraffic, bIsCustomConfig);
     if (!prevStatus) {
         SplitTunneling::instance().updateState();
     }
-    spdlog::info("firewallOn: allowLanTraffic = {}, isCustomConfig = {}", bAllowLanTraffic, bIsCustomConfig);
-    return std::string();
+    spdlog::info("firewallOn: allowLanTraffic = {}, isCustomConfig = {}, complete = {}", bAllowLanTraffic, bIsCustomConfig, isComplete);
+    // false: the firewall is on but some requested permits are missing; the client reports it.
+    return serializeResult(isComplete);
 }
 
 std::string firewallOff(const std::string &pars)
@@ -745,7 +750,8 @@ std::string enableDnsLeaksProtection(const std::string &pars)
     WS_DEBUG_TRACE_SCOPE("enableDnsLeaksProtection");
 
     std::vector<std::wstring> customDnsIp;
-    deserializePars(pars, customDnsIp);
+    bool permitWindscribeApps = false;
+    deserializePars(pars, customDnsIp, permitWindscribeApps);
 
     // Rather than reject the whole request on bad input, sanitize it: drop any invalid IP entries
     // and apply the valid remainder. These IPs are only excluded from the DNS firewall block, so
@@ -761,7 +767,7 @@ std::string enableDnsLeaksProtection(const std::string &pars)
                       customDnsIp.end());
 
     DnsFirewall::instance().setExcludeIps(customDnsIp);
-    DnsFirewall::instance().enable();
+    DnsFirewall::instance().enable(permitWindscribeApps);
     return std::string();
 }
 

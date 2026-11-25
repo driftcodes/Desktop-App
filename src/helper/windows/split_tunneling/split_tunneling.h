@@ -24,6 +24,10 @@ public:
 
     static void removeAllFilters(FwpmWrapper& fwmpWrapper);
 
+    // Looks for Windscribe's programs again when none could be identified at service start (the
+    // scoped firewall and DNS permits need them). Returns how many are known afterwards.
+    size_t redetectWindscribeAppsIfMissing();
+
 private:
     CalloutFilter calloutFilter_;
     RoutesManager routesManager_;
@@ -48,7 +52,9 @@ private:
     // Not the ifIndex: Windows reuses the index of a removed tunnel adapter for a new physical
     // one, which would then be mistaken for the tunnel.
     UINT64 lastVpnLuid_ = 0;
+    size_t windscribeAppsCount_ = 0;
 
     SplitTunneling(FwpmWrapper& fwpmWrapper);
     void detectVpnExecutables();
+    void publishWindscribeAppsIds();
 };

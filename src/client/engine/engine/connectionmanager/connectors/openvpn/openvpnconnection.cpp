@@ -427,7 +427,11 @@ void OpenVPNConnection::run()
     // DCO cannot carry OpenVPN's proxy support, so a proxied attempt always uses the regular adapter.
     const bool useDCODriver = !isCustomConfig_ && !sessionParams_.isEmergencyConnect && ExtraConfig::instance().useOpenVpnDCO() && !isProxyForwarded();
     const bool adapterCreated = helper_->createOpenVpnAdapter(useDCODriver);
-    helper_->enableDnsLeaksProtection();
+    // A proxied session's DNS leak filter is owned by the engine (Engine::updateProxiedDnsLeakProtection),
+    // which keeps it on from connect to final disconnect, including between OpenVPN processes.
+    if (!isProxyForwarded()) {
+        helper_->enableDnsLeaksProtection();
+    }
 #elif defined (Q_OS_LINUX)
     // NOTE: The emergency connect OpenVPN server is old-old and generates data packets not supported by the DCO driver.
     // DCO cannot carry OpenVPN's proxy support, so a proxied attempt (custom configs included) disables it.
@@ -451,7 +455,9 @@ void OpenVPNConnection::run()
     io_context_.run();
 
 #ifdef Q_OS_WIN
-    helper_->disableDnsLeaksProtection();
+    if (!isProxyForwarded()) {
+        helper_->disableDnsLeaksProtection();
+    }
     helper_->removeOpenVpnAdapter();
     // This prevents the adapter/network number from increasing on each connection.
     helper_->removeAppNetworkProfiles();

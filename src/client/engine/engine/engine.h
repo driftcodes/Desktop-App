@@ -13,6 +13,7 @@
 #include "networkdetectionmanager/inetworkdetectionmanager.h"
 #include "networkdetectionmanager/waitfornetworkconnectivity.h"
 #include "firewall/firewallcontroller.h"
+#include "firewall/firewallpolicy.h"
 #include "api_responses/notification.h"
 #include "bridgeapi/bridgeapimanager.h"
 #include "locationsmodel/enginelocationsmodel.h"
@@ -351,6 +352,12 @@ private:
 #ifdef Q_OS_WIN
     void enableDohSettings();
     void sendVpnSessionStatusToHelper(const AdapterGatewayInfo &defaultAdapter);
+    // With a proxy set, the DNS leak filter (port 53 to the physical adapters' DNS servers) stays on
+    // from the start of connecting to the final disconnect, including the gaps between OpenVPN
+    // processes, instead of following each OpenVPN process.
+    void updateProxiedDnsLeakProtection(CONNECT_STATE state, DISCONNECT_REASON reason);
+    void applyProxiedDnsLeakFilter(const firewall_policy::DnsLeakFilterStep &step);
+    firewall_policy::DnsLeakFilter proxiedDnsLeakFilter_ = firewall_policy::DnsLeakFilter::kOff;
 #endif
 
     types::EngineSettings engineSettings_;

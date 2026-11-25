@@ -51,24 +51,49 @@ Emergency Connect is unchanged and never uses the proxy.
 - While not connected (disconnected, connecting, or reconnecting after Wi-Fi or Throne drops) with a
   proxy set, the firewall on Windows allows your DNS servers (and ControlD's) only for Windscribe's own
   programs: the app (which does Windscribe's DNS lookups, including for hostname-based imported
-  profiles), its bundled tools, ctrld and the helper service. Any other program's DNS or DNS-over-HTTPS
-  to those addresses is blocked, also between the old OpenVPN process exiting and the new one starting
-  (when Windscribe's separate DNS leak filter is off). The Windows DNS Client service is not on that
-  list, so programs cannot route lookups through it either. Throne and other excluded apps keep their
-  own split-tunnel permit. The API server addresses and the ping targets are not allowed at all in
-  that state; the API goes through the proxy. Limits:
-  - A DNS server in a private range (for example your router, 192.168.x.x) stays reachable for every
-    program: the firewall always allows private ranges for imported profiles.
-  - The boot-time firewall (Always On, before the app starts) cannot tell programs apart, so it still
-    allows those DNS servers for every program until the app is running.
+  profiles), its bundled tools, ctrld and the helper service. The Windows DNS Client service is not on
+  that list, so programs cannot route lookups through it either. Throne and other excluded apps keep
+  their own split-tunnel permit. The API server addresses and the ping targets are not allowed at all
+  in that state; the API goes through the proxy. If the helper cannot identify Windscribe's programs,
+  it adds no permit for those DNS servers at all (rather than one for every program), keeps the rest
+  of the firewall on, and the app logs the failure and retries on the next firewall update; until then
+  Windscribe may be unable to look up hostnames.
+- **DNS leak filter during a proxied session (Windows).** Windscribe has a second filter that blocks
+  DNS (port 53, UDP and TCP) to the DNS servers of your physical adapters. With a proxy set it now
+  stays on from the moment you click Connect until your own Disconnect, including reconnects and the
+  time between one OpenVPN process exiting and the next one starting. Before, it went off whenever an
+  OpenVPN process ended. If the session ends some other way while the firewall stays on (for example
+  Throne stopped, so the next attempt cannot reach the proxy, or a route error, or sleep), the filter
+  stays on too, until you turn the firewall off, log out, quit the app, or connect again. It covers a DNS server in a private
+  range, such as your router at 192.168.x.x, which the firewall's LAN permit would otherwise let every
+  program reach. While not connected, Windscribe's own programs and the apps excluded in Exclusive
+  split tunneling (Throne) may still use those DNS servers; while connected, no program may, as in the
+  official app. Other LAN traffic (printers, file shares, the router's web page) is not affected.
+  Limits:
+  - A program that sends DNS to some other address or port (DNS-over-HTTPS to a public resolver, for
+    example) is not covered by this filter; the firewall covers it while it is on.
+  - After your own Disconnect the filter is off, as in the official app. In Always On mode the firewall
+    stays on, and a DNS server in a private range is then reachable by every program through the LAN
+    permit, while public DNS servers stay limited to Windscribe's programs.
+  - The filter covers the DNS servers your adapters had when the last attempt started. If you join a
+    different network while it is kept after an error, the new network's DNS server is not covered
+    until you connect again.
+  - Throne has to resolve its own server's name itself, or use an IP address: lookups it hands to the
+    Windows DNS Client service are blocked while a proxied session is not connected.
   - macOS and Linux keep upstream's behaviour (DNS servers allowed for every program).
   - Without a proxy nothing changes from the official app.
+- **Always On at boot (before the app starts).** The Windows controller does not use the list it is
+  given for the boot-time firewall: the helper simply keeps the rules it last applied, which persist
+  across a restart. With a proxy set that is normally the not-connected rules above, so the DNS
+  permits stay limited to Windscribe's programs. The DNS leak filter does not persist; it is set up
+  again when you connect. What exactly is in place after a reboot has not been confirmed on a real
+  Windows restart yet.
 
 ### Reconnecting
 
 When the tunnel drops and the app reconnects, Windscribe's own API requests go through the proxy again
-(the official app leaves them going directly until the next full disconnect), and the firewall switches
-to the not-connected list described above.
+(the official app leaves them going directly until the next full disconnect), the firewall switches
+to the not-connected list described above, and the DNS leak filter stays on throughout.
 
 ### Firewall behaviour
 
@@ -99,6 +124,28 @@ whose `redirect-gateway` was in the file rather than pushed by the server, made 
 Connection switch the firewall off once connected. A profile that really only routes some networks
 still switches it off, because blocking everything else would cut your internet. **Always On** never
 switches the firewall off.
+
+## Checking for DNS leaks (Windows)
+
+Test with an app that is **not** excluded from the tunnel (not Edge, if you exclude it; for example
+`nslookup` from a Command Prompt, or a browser you did not exclude) and watch the **physical Wi-Fi
+adapter** with Wireshark (filter: `udp.port == 53 || tcp.port == 53`). Find your Wi-Fi DNS server with
+`ipconfig /all` (usually your router, 192.168.x.x).
+
+1. Connect with the proxy set. Run `nslookup example.com <your Wi-Fi DNS server>` and
+   `nslookup example.com 1.1.1.1`. Neither may show up on the Wi-Fi capture (both should fail or go
+   through the tunnel).
+2. Make the tunnel drop and reconnect: turn Wi-Fi off and on. While the app shows Connecting, repeat
+   both lookups (a loop helps; replace 192.168.1.1 with your Wi-Fi DNS server:
+   `for /l %i in (1,1,60) do nslookup example.com 192.168.1.1 & timeout /t 1`). Neither may reach the
+   Wi-Fi DNS server or 1.1.1.1 on the capture. Windscribe itself and Throne may still show DNS traffic
+   there; that is expected.
+3. Stop Throne while connected. The app should end with "could not reach the proxy" and the firewall
+   should stay on; the lookups must still not appear on the capture. Start Throne and connect again.
+4. Disconnect and reconnect from the app, and check the same while it connects.
+5. Do this with the firewall in Automatic / Before Connection and in Always On.
+
+Your router's web page, printers and file shares should keep working throughout.
 
 ## Building with GitHub Actions
 

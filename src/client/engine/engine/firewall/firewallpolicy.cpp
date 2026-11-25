@@ -30,4 +30,46 @@ void leaveConnection(FirewallController &controller, FirewallExceptions &excepti
     }
 }
 
+DnsLeakFilterStep proxiedDnsLeakFilter(DnsLeakFilter current, CONNECT_STATE state, bool isProxySet, bool keepAfterSession)
+{
+    switch (state) {
+    case CONNECT_STATE_CONNECTING:
+        // A session that started proxied keeps the filter even if the proxy is turned off meanwhile.
+        if (current == DnsLeakFilter::kOff && !isProxySet) {
+            return {current, false};
+        }
+        return {DnsLeakFilter::kPermitWindscribeApps, true};
+    case CONNECT_STATE_CONNECTED:
+        if (current == DnsLeakFilter::kPermitWindscribeApps) {
+            return {DnsLeakFilter::kBlockAll, true};
+        }
+        return {current, false};
+    case CONNECT_STATE_DISCONNECTING:
+        // The tunnel is going away; a reconnect may follow before the next CONNECTING.
+        if (current == DnsLeakFilter::kBlockAll) {
+            return {DnsLeakFilter::kPermitWindscribeApps, true};
+        }
+        return {current, false};
+    case CONNECT_STATE_DISCONNECTED:
+        // Final disconnect, error or sleep; a reconnect does not pass through here.
+        if (current == DnsLeakFilter::kOff) {
+            return {current, false};
+        }
+        if (keepAfterSession) {
+            return {DnsLeakFilter::kPermitWindscribeApps, current != DnsLeakFilter::kPermitWindscribeApps};
+        }
+        return {DnsLeakFilter::kOff, true};
+    }
+    return {current, false};
+}
+
+DnsLeakFilterStep proxiedDnsLeakFilterAfterFirewallOff(DnsLeakFilter current, CONNECT_STATE state)
+{
+    // During a session the filter follows the session (the Automatic firewall can go off once connected).
+    if (state == CONNECT_STATE_DISCONNECTED && current != DnsLeakFilter::kOff) {
+        return {DnsLeakFilter::kOff, true};
+    }
+    return {current, false};
+}
+
 } // namespace firewall_policy

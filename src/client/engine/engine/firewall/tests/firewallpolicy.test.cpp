@@ -174,4 +174,77 @@ void TestFirewallPolicy::testAfterConnectedDecision()
     }
 }
 
+void TestFirewallPolicy::testProxiedDnsLeakFilterSpansReconnect()
+{
+    using namespace firewall_policy;
+    // Connect, drop (Wi-Fi or Throne), reconnect, then the user's disconnect. The filter must never
+    // be off in between, also where the old OpenVPN process has exited and the next not started.
+    const CONNECT_STATE sequence[] = {CONNECT_STATE_CONNECTING, CONNECT_STATE_CONNECTED,
+                                      CONNECT_STATE_CONNECTING, CONNECT_STATE_CONNECTING,  // next attempt
+                                      CONNECT_STATE_CONNECTED,  CONNECT_STATE_DISCONNECTING,
+                                      CONNECT_STATE_CONNECTING, CONNECT_STATE_CONNECTED,   // location change
+                                      CONNECT_STATE_DISCONNECTING};
+    const DnsLeakFilter expected[] = {DnsLeakFilter::kPermitWindscribeApps, DnsLeakFilter::kBlockAll,
+                                      DnsLeakFilter::kPermitWindscribeApps, DnsLeakFilter::kPermitWindscribeApps,
+                                      DnsLeakFilter::kBlockAll,             DnsLeakFilter::kPermitWindscribeApps,
+                                      DnsLeakFilter::kPermitWindscribeApps, DnsLeakFilter::kBlockAll,
+                                      DnsLeakFilter::kPermitWindscribeApps};
+    DnsLeakFilter filter = DnsLeakFilter::kOff;
+    for (size_t i = 0; i < sizeof(sequence) / sizeof(sequence[0]); ++i) {
+        // The proxy being turned off mid-session does not drop the filter either.
+        const auto step = proxiedDnsLeakFilter(filter, sequence[i], i < 4);
+        filter = step.next;
+        QCOMPARE(filter, expected[i]);
+        if (sequence[i] == CONNECT_STATE_CONNECTING) {
+            QVERIFY(step.apply);  // re-applied per attempt, for the current network's DNS servers
+        }
+    }
+    const auto last = proxiedDnsLeakFilter(filter, CONNECT_STATE_DISCONNECTED, false);
+    QCOMPARE(last.next, DnsLeakFilter::kOff);
+    QVERIFY(last.apply);
+    // A connect refused before any attempt (e.g. UDP-only profile) also ends with the filter off.
+    auto refused = proxiedDnsLeakFilter(DnsLeakFilter::kOff, CONNECT_STATE_CONNECTING, true);
+    refused = proxiedDnsLeakFilter(refused.next, CONNECT_STATE_DISCONNECTED, true);
+    QCOMPARE(refused.next, DnsLeakFilter::kOff);
+    QVERIFY(refused.apply);
+}
+
+void TestFirewallPolicy::testDnsLeakFilterUntouchedWithoutProxy()
+{
+    using namespace firewall_policy;
+    // Without a proxy the engine leaves the filter to each connection, as in the official app.
+    for (CONNECT_STATE state : {CONNECT_STATE_CONNECTING, CONNECT_STATE_CONNECTED, CONNECT_STATE_DISCONNECTING,
+                                CONNECT_STATE_DISCONNECTED}) {
+        const auto step = proxiedDnsLeakFilter(DnsLeakFilter::kOff, state, false);
+        QCOMPARE(step.next, DnsLeakFilter::kOff);
+        QVERIFY(!step.apply);
+    }
+}
+
+void TestFirewallPolicy::testDnsLeakFilterKeptAfterErrorUntilFirewallOff()
+{
+    using namespace firewall_policy;
+    // Throne stopped: the reconnect's proxy check fails and the session ends with an error while the
+    // firewall stays on. The filter stays, still letting Windscribe's programs and Throne resolve.
+    auto step = proxiedDnsLeakFilter(DnsLeakFilter::kPermitWindscribeApps, CONNECT_STATE_DISCONNECTED, true, true);
+    QCOMPARE(step.next, DnsLeakFilter::kPermitWindscribeApps);
+    QVERIFY(!step.apply);
+    step = proxiedDnsLeakFilter(DnsLeakFilter::kBlockAll, CONNECT_STATE_DISCONNECTED, true, true);
+    QCOMPARE(step.next, DnsLeakFilter::kPermitWindscribeApps);
+    QVERIFY(step.apply);
+
+    // Turning the firewall off while disconnected removes it ...
+    step = proxiedDnsLeakFilterAfterFirewallOff(DnsLeakFilter::kPermitWindscribeApps, CONNECT_STATE_DISCONNECTED);
+    QCOMPARE(step.next, DnsLeakFilter::kOff);
+    QVERIFY(step.apply);
+    // ... but not during a session (Automatic mode can turn the firewall off once connected).
+    for (CONNECT_STATE state : {CONNECT_STATE_CONNECTING, CONNECT_STATE_CONNECTED, CONNECT_STATE_DISCONNECTING}) {
+        step = proxiedDnsLeakFilterAfterFirewallOff(DnsLeakFilter::kBlockAll, state);
+        QCOMPARE(step.next, DnsLeakFilter::kBlockAll);
+        QVERIFY(!step.apply);
+    }
+    step = proxiedDnsLeakFilterAfterFirewallOff(DnsLeakFilter::kOff, CONNECT_STATE_DISCONNECTED);
+    QVERIFY(!step.apply);
+}
+
 QTEST_MAIN(TestFirewallPolicy)

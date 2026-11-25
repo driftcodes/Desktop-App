@@ -12,4 +12,7 @@ private slots:
     void testLeaveConnectionForgetsEndpointAndKeepsFirewallOn();
     void testLeaveConnectionLeavesFirewallOff();
     void testAfterConnectedDecision();
+    void testProxiedDnsLeakFilterSpansReconnect();
+    void testDnsLeakFilterUntouchedWithoutProxy();
+    void testDnsLeakFilterKeptAfterErrorUntilFirewallOff();
 };

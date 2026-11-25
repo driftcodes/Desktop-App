@@ -6,6 +6,7 @@
 #include "firewallfilter.h"
 #include "utils.h"
 #include "adapters_info.h"
+#include "scoped_permit_plan.h"
 
 
 FirewallFilter::FirewallFilter(FwpmWrapper &fwpmWrapper) :
@@ -19,9 +20,10 @@ void FirewallFilter::release()
 {
 }
 
-void FirewallFilter::on(const wchar_t *connectingIp, const std::vector<std::wstring> &ips, const std::vector<std::wstring> &windscribeOnlyIps,
+bool FirewallFilter::on(const wchar_t *connectingIp, const std::vector<std::wstring> &ips, const std::vector<std::wstring> &windscribeOnlyIps,
                         bool bAllowLocalTraffic, bool bIsCustomConfig)
 {
+    bool isComplete = false;
     std::lock_guard<std::recursive_mutex> guard(mutex_);
 
     HANDLE hEngine = fwpmWrapper_.getHandleAndLock();
@@ -41,13 +43,14 @@ void FirewallFilter::on(const wchar_t *connectingIp, const std::vector<std::wstr
 
     DWORD dwRet = FwpmSubLayerAdd0(hEngine, &subLayer, NULL );
     if (dwRet == ERROR_SUCCESS) {
-        addFilters(hEngine, connectingIp, ips, windscribeOnlyIps, bAllowLocalTraffic, bIsCustomConfig);
+        isComplete = addFilters(hEngine, connectingIp, ips, windscribeOnlyIps, bAllowLocalTraffic, bIsCustomConfig);
     } else {
         spdlog::error("FirewallFilter::on(), FwpmSubLayerAdd0 failed: {}", dwRet);
     }
 
     fwpmWrapper_.endTransaction();
     fwpmWrapper_.unlock();
+    return isComplete;
 }
 
 void FirewallFilter::off()
@@ -196,9 +199,11 @@ void FirewallFilter::setSplitTunnelingWhitelistIps(const std::vector<types::IpAd
     fwpmWrapper_.unlock();
 }
 
-void FirewallFilter::addFilters(HANDLE engineHandle, const wchar_t *connectingIp, const std::vector<std::wstring> &ips,
+bool FirewallFilter::addFilters(HANDLE engineHandle, const wchar_t *connectingIp, const std::vector<std::wstring> &ips,
                                 const std::vector<std::wstring> &windscribeOnlyIps, bool bAllowLocalTraffic, bool bIsCustomConfig)
 {
+    // false when a permit the caller asked for is missing (the firewall is still on, blocking more).
+    bool isComplete = true;
     AdaptersInfo ai;
     std::vector<NET_IFINDEX> taps = ai.getTAPAdapters();
 
@@ -303,20 +308,22 @@ void FirewallFilter::addFilters(HANDLE engineHandle, const wchar_t *connectingIp
     // Addresses only Windscribe's own programs may reach (the DNS servers while not connected through a
     // proxy). Any port, like the filter above, but only for these applications: another program's
     // ordinary DNS or DNS-over-HTTPS to them is blocked. Throne and other excluded apps keep their own
-    // split-tunnel permit. If the programs could not be identified, fall back to the unscoped permit
-    // rather than cutting Windscribe off from DNS.
-    if (!windscribeOnlyIps.empty()) {
-        AppsIds allowedIds = windscribeAppsIds_;
-        if (allowedIds.count() == 0) {
-            spdlog::error("FirewallFilter: Windscribe programs unknown, permitting the DNS servers for every program");
-        }
-        for (const auto &ip : windscribeOnlyIps) {
-            const std::vector<types::IpAddressRange> ipAddr = { types::IpAddressRange(ip) };
-            ret = Utils::addFilterV4(engineHandle, nullptr, FWP_ACTION_PERMIT, 2, subLayerGUID_, FIREWALL_SUBLAYER_NAMEW, nullptr,
-                                     &ipAddr, 0, 0, allowedIds.count() > 0 ? &allowedIds : nullptr);
-            if (!ret) {
-                spdlog::error("Could not add " WS_PRODUCT_NAME "-only IPs allow filter");
-            }
+    // split-tunnel permit. If the programs could not be identified, no permit is added at all (a
+    // permit without a program condition would apply to every program); the rest of the firewall
+    // stays on and on() reports the failure.
+    const std::vector<std::wstring> scopedIps = scoped_permits::windscribeOnlyPermits(windscribeOnlyIps, windscribeAppsIds_.count());
+    if (!windscribeOnlyIps.empty() && scopedIps.empty()) {
+        spdlog::error("FirewallFilter: Windscribe programs unknown, not permitting {} DNS server(s) for any program",
+                      windscribeOnlyIps.size());
+        isComplete = false;
+    }
+    for (const auto &ip : scopedIps) {
+        const std::vector<types::IpAddressRange> ipAddr = { types::IpAddressRange(ip) };
+        ret = Utils::addFilterV4(engineHandle, nullptr, FWP_ACTION_PERMIT, 2, subLayerGUID_, FIREWALL_SUBLAYER_NAMEW, nullptr,
+                                 &ipAddr, 0, 0, &windscribeAppsIds_);
+        if (!ret) {
+            spdlog::error("Could not add " WS_PRODUCT_NAME "-only IPs allow filter");
+            isComplete = false;
         }
     }
 
@@ -419,6 +426,7 @@ void FirewallFilter::addFilters(HANDLE engineHandle, const wchar_t *connectingIp
     if (!ret) {
         spdlog::error("Could not add IPv6 ULA LAN traffic allow/block filter.");
     }
+    return isComplete;
 }
 
 void FirewallFilter::addPermitFilterForVpnAndSystemServices(HANDLE engineHandle, const wchar_t *connectingIp)

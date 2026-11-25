@@ -193,9 +193,12 @@ bool Helper_win::getWireGuardStatus(types::WireGuardStatus *status)
     return true;
 }
 
-void Helper_win::firewallOn(const QString &connectingIp, const QStringList &ips, const QStringList &windscribeOnlyIps, bool bAllowLanTraffic, bool bIsCustomConfig)
+bool Helper_win::firewallOn(const QString &connectingIp, const QStringList &ips, const QStringList &windscribeOnlyIps, bool bAllowLanTraffic, bool bIsCustomConfig)
 {
-    sendCommand(HelperCommand::firewallOn, connectingIp.toStdWString(), toStdVector(ips), toStdVector(windscribeOnlyIps), bAllowLanTraffic, bIsCustomConfig);
+    auto result = sendCommand(HelperCommand::firewallOn, connectingIp.toStdWString(), toStdVector(ips), toStdVector(windscribeOnlyIps), bAllowLanTraffic, bIsCustomConfig);
+    bool isComplete = false;
+    deserializeAnswer(result, isComplete);
+    return isComplete;
 }
 
 void Helper_win::firewallOff()
@@ -362,9 +365,9 @@ bool Helper_win::deleteWhitelistPorts()
     return success;
 }
 
-void Helper_win::enableDnsLeaksProtection()
+void Helper_win::enableDnsLeaksProtection(bool permitWindscribeApps)
 {
-    sendCommand(HelperCommand::enableDnsLeaksProtection, toStdVector(customDnsIp_));
+    sendCommand(HelperCommand::enableDnsLeaksProtection, toStdVector(customDnsIp_), permitWindscribeApps);
 }
 
 void Helper_win::disableDnsLeaksProtection()

@@ -21,8 +21,9 @@ public:
 
     // ips are permitted for every program; windscribeOnlyIps only for Windscribe's own programs (see
     // setWindscribeAppsIds) - not svchost, so the Windows DNS client cannot relay other programs'
-    // lookups through them.
-    void on(const wchar_t *connectingIp, const std::vector<std::wstring> &ips, const std::vector<std::wstring> &windscribeOnlyIps,
+    // lookups through them. Returns false when a requested permit could not be added (e.g. Windscribe's
+    // programs are unknown, so windscribeOnlyIps get no permit); the firewall is on either way.
+    bool on(const wchar_t *connectingIp, const std::vector<std::wstring> &ips, const std::vector<std::wstring> &windscribeOnlyIps,
             bool bAllowLocalTraffic, bool bIsCustomConfig);
     void off();
     bool currentStatus();
@@ -52,7 +53,7 @@ private:
     bool currentStatusImpl(HANDLE engineHandle);
     void offImpl(HANDLE engineHandle);
 
-    void addFilters(HANDLE engineHandle, const wchar_t *connectingIp, const std::vector<std::wstring> &ips,
+    bool addFilters(HANDLE engineHandle, const wchar_t *connectingIp, const std::vector<std::wstring> &ips,
                     const std::vector<std::wstring> &windscribeOnlyIps, bool bAllowLocalTraffic, bool bIsCustomConfig);
     void addPermitFilterForVpnAndSystemServices(HANDLE engineHandle, const wchar_t *ip);
     void addPermitFilterForAppsIds(HANDLE engineHandle);

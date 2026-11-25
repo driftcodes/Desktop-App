@@ -46,7 +46,9 @@ public:
     bool configureWireGuard(const WireGuardConfig &config);
     bool getWireGuardStatus(types::WireGuardStatus *status);
 
-    void firewallOn(const QString &connectingIp, const QStringList &ips, const QStringList &windscribeOnlyIps, bool bAllowLanTraffic, bool bIsCustomConfig);
+    // false: the helper turned the firewall on without some requested permits (e.g. Windscribe's
+    // programs unknown, so windscribeOnlyIps are not permitted at all), or did not answer.
+    bool firewallOn(const QString &connectingIp, const QStringList &ips, const QStringList &windscribeOnlyIps, bool bAllowLanTraffic, bool bIsCustomConfig);
     void firewallOff();
     bool firewallActualState();
 
@@ -81,7 +83,10 @@ public:
     bool whitelistPorts(const QString &ports);
     bool deleteWhitelistPorts();
 
-    void enableDnsLeaksProtection();
+    // permitWindscribeApps: also let Windscribe's programs and Exclusive-mode excluded apps reach the
+    // adapters' DNS servers (a proxied session that is not connected). Re-enabling replaces the rules
+    // atomically.
+    void enableDnsLeaksProtection(bool permitWindscribeApps = false);
     void disableDnsLeaksProtection();
 
     void reinstallWanIkev2();

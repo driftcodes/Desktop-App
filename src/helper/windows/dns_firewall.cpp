@@ -7,6 +7,7 @@
 #include <iphlpapi.h>
 
 #include "dns_firewall.h"
+#include "scoped_permit_plan.h"
 #include "utils.h"
 #include "utils/log/debug_trace.h"
 
@@ -29,10 +30,12 @@ void DnsFirewall::release()
 
 void DnsFirewall::disable()
 {
+    std::lock_guard<std::recursive_mutex> guard(mutex_);
     HANDLE hEngine = fwmpWrapper_.getHandleAndLock();
 
     fwmpWrapper_.beginTransaction();
     bCurrentState_ = false;
+    bPermitApps_ = false;
 
     if (Utils::deleteSublayerAndAllFilters(hEngine, &subLayerGUID_)) {
         spdlog::debug("DnsFirewall::disable(), all filters deleted");
@@ -44,15 +47,31 @@ void DnsFirewall::disable()
     fwmpWrapper_.unlock();
 }
 
-void DnsFirewall::enable()
+void DnsFirewall::enable(bool permitApps)
 {
-    // if already enabled, first remove previous filter
-    if (bCurrentState_) {
-        disable();
+    std::lock_guard<std::recursive_mutex> guard(mutex_);
+    bPermitApps_ = permitApps;
+    enableImpl();
+}
+
+void DnsFirewall::enableImpl()
+{
+    AppsIds permittedApps;
+    if (bPermitApps_) {
+        permittedApps.addFrom(windscribeAppsIds_);
+        permittedApps.addFrom(excludedAppsIds_);
+        if (permittedApps.count() == 0) {
+            spdlog::error("DnsFirewall::enable(), no permitted programs known; blocking DNS for every program");
+        }
     }
+    const auto dnsServers = getDnsServers();
 
     HANDLE hEngine = fwmpWrapper_.getHandleAndLock();
     fwmpWrapper_.beginTransaction();
+
+    // Old rules out and new rules in within one transaction: re-enabling (e.g. switching between the
+    // connected and the reconnecting rules) never leaves a moment without the block.
+    Utils::deleteSublayerAndAllFilters(hEngine, &subLayerGUID_);
 
     FWPM_SUBLAYER0 subLayer = { 0 };
 
@@ -65,12 +84,13 @@ void DnsFirewall::enable()
     DWORD dwFwAPiRetCode = FwpmSubLayerAdd0(hEngine, &subLayer, NULL);
     if (dwFwAPiRetCode != ERROR_SUCCESS && dwFwAPiRetCode != FWP_E_ALREADY_EXISTS) {
         spdlog::error("DnsFirewall::enable(), FwpmSubLayerAdd0 failed: {}", dwFwAPiRetCode);
-        fwmpWrapper_.endTransaction();
+        // Keep whatever rules were there before.
+        fwmpWrapper_.abortTransaction();
         fwmpWrapper_.unlock();
         return;
     }
 
-    addFilters(hEngine);
+    addFilters(hEngine, dnsServers, permittedApps);
 
     fwmpWrapper_.endTransaction();
     fwmpWrapper_.unlock();
@@ -79,6 +99,7 @@ void DnsFirewall::enable()
 
 void DnsFirewall::setExcludeIps(const std::vector<std::wstring>& ips)
 {
+    std::lock_guard<std::recursive_mutex> guard(mutex_);
     excludeIps_.clear();
     for (const auto &w : ips) {
         types::IpAddress addr(w);
@@ -88,33 +109,62 @@ void DnsFirewall::setExcludeIps(const std::vector<std::wstring>& ips)
     }
 }
 
-void DnsFirewall::addFilters(HANDLE engineHandle)
+void DnsFirewall::setWindscribeAppsIds(const AppsIds &appsIds)
 {
-    const auto dnsServers = getDnsServers();
+    std::lock_guard<std::recursive_mutex> guard(mutex_);
+    if (windscribeAppsIds_ == appsIds) {
+        return;
+    }
+    windscribeAppsIds_ = appsIds;
+    if (bCurrentState_ && bPermitApps_) {
+        enableImpl();
+    }
+}
 
-    // add block filter for each DNS ip on protocol UDP/TCP port 53.
-    // Rule weight must be greater than the LAN allow rule (4).
-    for (const auto &ip : dnsServers) {
-        if (excludeIps_.count(ip) > 0) {
-            spdlog::debug("DnsFirewall::addFilters(), ip excluded: {}", ip.toString());
-            continue;
-        }
+void DnsFirewall::setExcludedAppsIds(const AppsIds &appsIds)
+{
+    std::lock_guard<std::recursive_mutex> guard(mutex_);
+    if (excludedAppsIds_ == appsIds) {
+        return;
+    }
+    excludedAppsIds_ = appsIds;
+    if (bCurrentState_ && bPermitApps_) {
+        enableImpl();
+    }
+}
 
+void DnsFirewall::addFilters(HANDLE engineHandle, const std::set<types::IpAddress> &dnsServers, AppsIds &permittedApps)
+{
+    // For each DNS server: a block of port 53 (UDP and TCP) for every program, weight 6, above the
+    // main firewall's LAN permit (4), so a router in a private range is covered too; and, when
+    // programs are permitted, a permit for just them at weight 7, which wins within this sublayer.
+    // The main firewall still decides separately whether those programs may reach the address.
+    for (const auto &rule : scoped_permits::dnsFilterRules(dnsServers, excludeIps_, permittedApps.count())) {
+        const auto &ip = rule.server;
         // Wrap the single host as a dual-stack range; addFilterV4/V6 dispatch by family
         // (the wrong-family call is a no-op).
         const uint8_t prefix = ip.isV4() ? 32 : 128;
         const std::vector<types::IpAddressRange> addr = { types::IpAddressRange(ip, prefix) };
+        const FWP_ACTION_TYPE action = rule.isPermitForApps ? FWP_ACTION_PERMIT : FWP_ACTION_BLOCK;
+        const UINT8 weight = rule.isPermitForApps ? 7 : 6;
+        AppsIds *apps = rule.isPermitForApps ? &permittedApps : nullptr;
         bool ret = false;
         if (ip.isV4()) {
-            ret = Utils::addFilterV4(engineHandle, nullptr, FWP_ACTION_BLOCK, 6, subLayerGUID_, (wchar_t*)FIREWALL_SUBLAYER_DNS_NAMEW, nullptr, &addr, 0, 53, nullptr, false);
+            ret = Utils::addFilterV4(engineHandle, nullptr, action, weight, subLayerGUID_, (wchar_t*)FIREWALL_SUBLAYER_DNS_NAMEW, nullptr, &addr, 0, 53, apps, false);
         } else if (ip.isV6()) {
-            ret = Utils::addFilterV6(engineHandle, nullptr, FWP_ACTION_BLOCK, 6, subLayerGUID_, (wchar_t*)FIREWALL_SUBLAYER_DNS_NAMEW, nullptr, &addr, 0, 53, nullptr, false);
+            ret = Utils::addFilterV6(engineHandle, nullptr, action, weight, subLayerGUID_, (wchar_t*)FIREWALL_SUBLAYER_DNS_NAMEW, nullptr, &addr, 0, 53, apps, false);
         }
 
+        const char *kind = rule.isPermitForApps ? "permit (permitted programs)" : "block";
         if (!ret) {
-            spdlog::error("Could not add DNS filter for {}", ip.toString());
+            spdlog::error("Could not add DNS {} filter for {}", kind, ip.toString());
         } else {
-            spdlog::debug("Added DNS filter for {}", ip.toString());
+            spdlog::debug("Added DNS {} filter for {}", kind, ip.toString());
+        }
+    }
+    for (const auto &ip : dnsServers) {
+        if (excludeIps_.count(ip) > 0) {
+            spdlog::debug("DnsFirewall::addFilters(), ip excluded: {}", ip.toString());
         }
     }
 }

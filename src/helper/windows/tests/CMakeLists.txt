@@ -69,4 +69,20 @@ if(IS_BUILD_TESTS)
     )
     set_target_properties(wireguardconfigwriter.test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
     ws_add_test(wireguardconfigwriter)
+
+    # Program-scoped firewall rule plans: no unscoped permit when Windscribe's programs are unknown,
+    # and a DNS block for every adapter resolver, private ones included.
+    add_executable(scopedpermits.test
+        scopedpermits.test.cpp
+        ../../../client/client-common/types/ipaddress.cpp
+    )
+    target_link_libraries(scopedpermits.test PRIVATE
+        Ws2_32
+    )
+    target_include_directories(scopedpermits.test PRIVATE
+        ..
+        ../../../client/client-common
+    )
+    set_target_properties(scopedpermits.test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+    ws_add_test(scopedpermits)
 endif(IS_BUILD_TESTS)

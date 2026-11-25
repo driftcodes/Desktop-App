@@ -7,6 +7,7 @@
 #include <spdlog/spdlog.h>
 
 #include "../close_tcp_connections.h"
+#include "../dns_firewall.h"
 #include "../firewallfilter.h"
 #include "../ipv6_firewall.h"
 #include "../utils.h"
@@ -78,7 +79,11 @@ SplitTunneling::SplitTunneling(FwpmWrapper& fwpmWrapper)
 {
     connectStatus_.isConnected = false;
     detectVpnExecutables();
+    publishWindscribeAppsIds();
+}
 
+void SplitTunneling::publishWindscribeAppsIds()
+{
     AppsIds appsIds;
     appsIds.addFrom(vpnMainExecutableId_);
     appsIds.addFrom(vpnOtherExecutablesId_);
@@ -90,7 +95,21 @@ SplitTunneling::SplitTunneling(FwpmWrapper& fwpmWrapper)
     AppsIds serviceId;
     serviceId.setFromList({Utils::getExePath() + L"\\" + WS_APP_IDENTIFIER_W L"Service.exe"});
     windscribeAppsIds.addFrom(serviceId);
+    windscribeAppsCount_ = windscribeAppsIds.count();
+    if (windscribeAppsCount_ == 0) {
+        spdlog::error("SplitTunneling: could not identify any " WS_PRODUCT_NAME " program; program-scoped permits are omitted");
+    }
     FirewallFilter::instance().setWindscribeAppsIds(windscribeAppsIds);
+    DnsFirewall::instance().setWindscribeAppsIds(windscribeAppsIds);
+}
+
+size_t SplitTunneling::redetectWindscribeAppsIfMissing()
+{
+    if (windscribeAppsCount_ == 0) {
+        detectVpnExecutables();
+        publishWindscribeAppsIds();
+    }
+    return windscribeAppsCount_;
 }
 
 void SplitTunneling::release()
@@ -212,6 +231,9 @@ bool SplitTunneling::updateState()
     spdlog::debug("SplitTunneling::updateState begin");
     AppsIds appsIds;
     appsIds.setFromList(apps_);
+    // The DNS leak filter lets Exclusive-mode excluded apps (Throne) reach the adapter's DNS servers
+    // while a proxied session is not connected; they bypass the VPN by the user's choice.
+    DnsFirewall::instance().setExcludedAppsIds(isSplitTunnelEnabled_ && isExclude_ ? appsIds : AppsIds());
     // adapterIp is types::IpAddress; ipv4NetworkOrder() returns 0 for non-v4/invalid which
     // matches the previous Ip4AddressAndMask behaviour for empty/invalid input.
     DWORD localIp = connectStatus_.defaultAdapter.adapterIp.ipv4NetworkOrder();

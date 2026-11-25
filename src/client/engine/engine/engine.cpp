@@ -734,6 +734,15 @@ void Engine::initPart2()
     // The post-connect tunnel test is engine-owned; ConnectionManager only consumes the result.
     testVPNTunnel_ = new TestVPNTunnel(this);
     connect(testVPNTunnel_, &TestVPNTunnel::testsFinished, connectionManager_, &ConnectionManager::onTunnelTestResult);
+#ifdef Q_OS_WIN
+    // A DNS leak filter kept after a proxied session ended goes off with the firewall.
+    connect(this, &Engine::firewallStateChanged, this, [this](bool isEnabled) {
+        if (!isEnabled) {
+            applyProxiedDnsLeakFilter(firewall_policy::proxiedDnsLeakFilterAfterFirewallOff(
+                proxiedDnsLeakFilter_, connectStateController_->currentState()));
+        }
+    });
+#endif
     connect(connectionManager_, &ConnectionManager::connected, this, &Engine::onConnectionManagerConnected);
     connect(connectionManager_, &ConnectionManager::disconnected, this, &Engine::onConnectionManagerDisconnected);
     connect(connectionManager_, &ConnectionManager::reconnecting, this, &Engine::onConnectionManagerReconnecting);
@@ -946,6 +955,11 @@ void Engine::cleanupImpl(bool isUpdating)
 
         connectionManager_->removeIkev2ConnectionFromOS();
     }
+#ifdef Q_OS_WIN
+    // The proxied DNS leak filter is not persistent; don't leave it behind the app either.
+    applyProxiedDnsLeakFilter({firewall_policy::DnsLeakFilter::kOff,
+                               proxiedDnsLeakFilter_ != firewall_policy::DnsLeakFilter::kOff});
+#endif
 
     // turn off split tunneling
     if (helper_) {
@@ -3113,7 +3127,7 @@ void Engine::stopPacketDetectionImpl()
     packetSizeController_->earlyStop();
 }
 
-void Engine::onConnectStateChanged(CONNECT_STATE state, DISCONNECT_REASON /*reason*/, ConnectError /*err*/, const QString & /*errorDetail*/, const LocationID &lid)
+void Engine::onConnectStateChanged(CONNECT_STATE state, DISCONNECT_REASON reason, ConnectError /*err*/, const QString & /*errorDetail*/, const LocationID &lid)
 {
     // The rotated address is only worth waiting for while the connection that produced it lasts. This
     // also covers the tunnel test failing into a reconnect, which reports no result at all.
@@ -3137,6 +3151,10 @@ void Engine::onConnectStateChanged(CONNECT_STATE state, DISCONNECT_REASON /*reas
             helper_->sendConnectStatus(false, engineSettings_.isTerminateSockets(), engineSettings_.isAllowLanTraffic(), AdapterGatewayInfo::detectAndCreateDefaultAdapterInfo(), AdapterGatewayInfo(), QString(), types::Protocol());
         }
     }
+
+#ifdef Q_OS_WIN
+    updateProxiedDnsLeakProtection(state, reason);
+#endif
 
 #ifdef Q_OS_MACOS
     // Tear the proxy down whenever the connection settles into disconnected; no-op when not running.
@@ -3180,6 +3198,38 @@ void Engine::enableDohSettings()
 {
     if (WinUtils::isDohSupported()) {
         helper_->enableDohSettings();
+    }
+}
+
+void Engine::updateProxiedDnsLeakProtection(CONNECT_STATE state, DISCONNECT_REASON reason)
+{
+    if (!helper_) {
+        return;
+    }
+    // Ended by an error (e.g. Throne stopped, so the proxy is unreachable) or sleep with the firewall
+    // still on: keep the router's DNS closed to other programs, as the firewall keeps the rest closed.
+    const bool keepAfterSession = state == CONNECT_STATE_DISCONNECTED && reason != DISCONNECTED_BY_USER &&
+                                  firewallController_ && firewallController_->firewallActualState();
+    // While not connected, Windscribe's own programs keep DNS (wsnet resolves the API and imported
+    // hostnames itself, then goes through the proxy) and so do Exclusive-mode excluded apps such as
+    // Throne; every other program is blocked from the adapters' DNS servers, a router in a private
+    // range included, which the firewall's LAN permit alone would let through.
+    applyProxiedDnsLeakFilter(firewall_policy::proxiedDnsLeakFilter(
+        proxiedDnsLeakFilter_, state, ProxyServerController::instance().getCurrentProxySettings().isProxyEnabled(),
+        keepAfterSession));
+}
+
+void Engine::applyProxiedDnsLeakFilter(const firewall_policy::DnsLeakFilterStep &step)
+{
+    using firewall_policy::DnsLeakFilter;
+    proxiedDnsLeakFilter_ = step.next;
+    if (!step.apply || !helper_) {
+        return;
+    }
+    if (step.next == DnsLeakFilter::kOff) {
+        helper_->disableDnsLeaksProtection();
+    } else {
+        helper_->enableDnsLeaksProtection(step.next == DnsLeakFilter::kPermitWindscribeApps);
     }
 }
 
