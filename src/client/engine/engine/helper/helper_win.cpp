@@ -374,9 +374,9 @@ DnsLeakFilterResult Helper_win::enableDnsLeaksProtection(bool permitWindscribeAp
     return static_cast<DnsLeakFilterResult>(answer);
 }
 
-DnsLeakFilterResult Helper_win::disableDnsLeaksProtection(DnsLeakFilterOwner owner)
+DnsLeakFilterResult Helper_win::disableDnsLeaksProtection(DnsLeakFilterOwner owner, bool keepRules)
 {
-    auto result = sendCommand(HelperCommand::disableDnsLeaksProtection, static_cast<int>(owner));
+    auto result = sendCommand(HelperCommand::disableDnsLeaksProtection, static_cast<int>(owner), keepRules);
     int answer = static_cast<int>(DnsLeakFilterResult::kFailed);
     deserializeAnswer(result, answer);
     return static_cast<DnsLeakFilterResult>(answer);

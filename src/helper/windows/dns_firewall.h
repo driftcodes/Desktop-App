@@ -27,7 +27,9 @@ public:
     // false when the rules could not be removed; they then stay whole. Requests are carried out for
     // the filter's current owner only (DnsLeakFilterOwnership); others are ignored and return true /
     // kApplied.
-    bool disable(DnsLeakFilterOwner requester);
+    // keepRules: the owner only lets go (hand-over); the rules stay in place, unwatched, until the
+    // next owner's enable replaces them in one transaction or a later disable removes them.
+    bool disable(DnsLeakFilterOwner requester, bool keepRules = false);
     // Blocks port 53 to every adapter's DNS servers (minus the custom connected DNS). permitApps (a
     // proxied session that is not connected) blocks every local-network range as well, so a router
     // on a network joined meanwhile is covered too, applies no exclusions, and lets Windscribe's own

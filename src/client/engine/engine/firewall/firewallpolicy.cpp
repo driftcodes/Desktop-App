@@ -38,13 +38,13 @@ DnsLeakFilterStep proxiedDnsLeakFilter(DnsLeakFilter current, CONNECT_STATE stat
         // Entered once per connect or reconnect: the state controller does not repeat CONNECTING for
         // further attempts, so network changes are handled by proxiedDnsLeakFilterOnNetworkChange.
         if (!isProxySet) {
-            if (current == DnsLeakFilter::kOff) {
+            if (!isEnginesDnsLeakFilter(current)) {
                 return {current, false};
             }
             if (isNewSession) {
-                // A new session without a proxy: its connector manages the filter. Release the one
-                // kept after the previous proxied session (the helper then follows the connector).
-                return {DnsLeakFilter::kOff, true};
+                // A new session without a proxy: its connector manages the filter. Hand over the one
+                // kept after the previous proxied session, rules left in place for the connector.
+                return {DnsLeakFilter::kHandedOver, true};
             }
             // A proxied session reconnecting after the proxy was turned off keeps the filter.
         }
@@ -52,6 +52,10 @@ DnsLeakFilterStep proxiedDnsLeakFilter(DnsLeakFilter current, CONNECT_STATE stat
     case CONNECT_STATE_CONNECTED:
         if (current == DnsLeakFilter::kPermitWindscribeApps) {
             return {DnsLeakFilter::kBlockAll, true};
+        }
+        if (current == DnsLeakFilter::kHandedOver) {
+            // The connector has taken the rules over by now; removing what is left is ignored then.
+            return {DnsLeakFilter::kOff, true};
         }
         return {current, false};
     case CONNECT_STATE_DISCONNECTING:
@@ -65,7 +69,7 @@ DnsLeakFilterStep proxiedDnsLeakFilter(DnsLeakFilter current, CONNECT_STATE stat
         if (current == DnsLeakFilter::kOff) {
             return {current, false};
         }
-        if (keepAfterSession) {
+        if (keepAfterSession && isEnginesDnsLeakFilter(current)) {
             return {DnsLeakFilter::kPermitWindscribeApps, current != DnsLeakFilter::kPermitWindscribeApps};
         }
         return {DnsLeakFilter::kOff, true};
@@ -75,7 +79,7 @@ DnsLeakFilterStep proxiedDnsLeakFilter(DnsLeakFilter current, CONNECT_STATE stat
 
 DnsLeakFilterStep proxiedDnsLeakFilterOnNetworkChange(DnsLeakFilter current)
 {
-    return {current, current != DnsLeakFilter::kOff};
+    return {current, isEnginesDnsLeakFilter(current)};
 }
 
 DnsLeakFilterStep proxiedDnsLeakFilterAfterFirewallOff(DnsLeakFilter current, CONNECT_STATE state)
@@ -97,7 +101,7 @@ void ProxiedDnsLeakFilter::onConnectState(CONNECT_STATE state, bool isProxySet, 
     const bool isNewSession = state == CONNECT_STATE_CONNECTING && lastState_ == CONNECT_STATE_DISCONNECTED;
     lastState_ = state;
     const DnsLeakFilterStep step = proxiedDnsLeakFilter(wanted_, state, isProxySet, keepAfterSession, isNewSession);
-    if (state == CONNECT_STATE_CONNECTING && step.next == DnsLeakFilter::kOff) {
+    if (state == CONNECT_STATE_CONNECTING && !isEnginesDnsLeakFilter(step.next)) {
         // A session without a proxy: its connector manages the filter itself. A pending retry (say, of
         // a failed disable after the previous proxied session) must not turn off what it enables, and
         // nothing confirmed before still holds: the connector removes the filter when it ends.
@@ -132,7 +136,7 @@ void ProxiedDnsLeakFilter::onRetry(quint64 token)
 
 void ProxiedDnsLeakFilter::claimForProxiedRequest(bool isProxied)
 {
-    if (isProxied && wanted_ == DnsLeakFilter::kOff) {
+    if (isProxied && !isEnginesDnsLeakFilter(wanted_)) {
         // E.g. the proxy turned on and another location picked while an attempt without it was still
         // CONNECTING: no CONNECTING arrives for the replacement, and its OpenVPN leaves the filter to
         // the engine. The previous connector's teardown is then ignored by the helper.
@@ -146,19 +150,19 @@ void ProxiedDnsLeakFilter::onConnectRequest(bool isProxied, bool isPreviousSessi
 {
     if (isProxied) {
         claimForProxiedRequest(true);
-    } else if (wanted_ != DnsLeakFilter::kOff && !isPreviousSessionActive) {
-        // Hand-over: the helper passes ownership on even if the removal fails, and ignores this
-        // engine's retries once the connector holds the filter.
+    } else if (isEnginesDnsLeakFilter(wanted_) && !isPreviousSessionActive) {
+        // Hand-over without removal: the connector replaces the rules when it starts. The helper
+        // ignores this engine's retries once the connector holds the filter.
         ++token_;
         confirmed_ = DnsLeakFilter::kOff;
-        apply({DnsLeakFilter::kOff, true});
+        apply({DnsLeakFilter::kHandedOver, true});
     }
 }
 
 bool ProxiedDnsLeakFilter::mayConnect(bool isProxied)
 {
     claimForProxiedRequest(isProxied);
-    if (wanted_ == DnsLeakFilter::kOff || confirmed_ == wanted_) {
+    if (!isEnginesDnsLeakFilter(wanted_) || confirmed_ == wanted_) {
         return true;
     }
     send();
@@ -192,7 +196,7 @@ void ProxiedDnsLeakFilter::send()
 {
     ++token_;  // supersedes any retry already scheduled
     const DnsLeakFilterSendResult result = send_(wanted_);
-    if (wanted_ == DnsLeakFilter::kOff) {
+    if (!isEnginesDnsLeakFilter(wanted_)) {
         if (result == DnsLeakFilterSendResult::kApplied) {
             confirmed_ = DnsLeakFilter::kOff;
             retryDelayMs_ = kFirstRetryMs;

@@ -22,6 +22,7 @@ private slots:
     void testNewUnproxiedSessionAfterErrorTakesOverFilter();
     void testProxiedRequestReplacingAttemptStillConnecting();
     void testDirectRequestReplacingProxiedSession();
+    void testRequestKeepsProxyChosenAtSelection();
     void testRetryBacksOffAndStopsOnSuccess();
     void testDnsLeakFilterKeptAfterErrorUntilFirewallOff();
 };

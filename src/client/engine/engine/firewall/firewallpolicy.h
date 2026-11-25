@@ -36,7 +36,17 @@ void leaveConnection(FirewallController &controller, FirewallExceptions &excepti
 // rest; while connected every program is blocked from the adapters' resolvers.
 // A session that ends without the user's Disconnect (proxy unreachable, route error, sleep) while the
 // firewall stays on keeps it (keepAfterSession) until the firewall goes off or the next session.
-enum class DnsLeakFilter { kOff, kPermitWindscribeApps, kBlockAll };
+// kHandedOver: the engine let go of the filter for a connection without a proxy but left its rules in
+// place; that connection's connector replaces them in one step when it starts (no moment without a
+// filter). The engine removes them once the session is connected or over, which the helper ignores if
+// the connector holds the filter by then.
+enum class DnsLeakFilter { kOff, kPermitWindscribeApps, kBlockAll, kHandedOver };
+
+// The engine holds the filter (kPermitWindscribeApps or kBlockAll).
+inline bool isEnginesDnsLeakFilter(DnsLeakFilter f)
+{
+    return f == DnsLeakFilter::kPermitWindscribeApps || f == DnsLeakFilter::kBlockAll;
+}
 
 struct DnsLeakFilterStep
 {

@@ -91,7 +91,9 @@ public:
     // ignores requests that are not the current owner's (see DnsLeakFilterOwnership).
     DnsLeakFilterResult enableDnsLeaksProtection(bool permitWindscribeApps = false,
                                                  DnsLeakFilterOwner owner = DnsLeakFilterOwner::kConnection);
-    DnsLeakFilterResult disableDnsLeaksProtection(DnsLeakFilterOwner owner = DnsLeakFilterOwner::kConnection);
+    // keepRules: only let go of the filter; its rules stay until the next owner replaces them.
+    DnsLeakFilterResult disableDnsLeaksProtection(DnsLeakFilterOwner owner = DnsLeakFilterOwner::kConnection,
+                                                  bool keepRules = false);
 
     void reinstallWanIkev2();
     void enableWanIkev2();

@@ -15,6 +15,7 @@
 #include "networkdetectionmanager/waitfornetworkconnectivity.h"
 #include "firewall/firewallcontroller.h"
 #include "firewall/firewallpolicy.h"
+#include "requestproxysettings.h"
 #include "api_responses/notification.h"
 #include "bridgeapi/bridgeapimanager.h"
 #include "locationsmodel/enginelocationsmodel.h"
@@ -230,6 +231,8 @@ private slots:
     void enableBFE_winImpl();
     void recordInstallImpl();
     void sendConfirmEmailImpl();
+    // A new request from the user (or auto-connect): takes the proxy settings it is made with, then
+    // connectImpl().
     void connectClickImpl(const LocationID &locationId, const types::ConnectionSettings &connectionSettings, const QPair<QString, QString> &pinnedNode);
     void disconnectClickImpl(DISCONNECT_REASON reason);
     void sendDebugLogImpl();
@@ -349,6 +352,12 @@ private slots:
 private:
     void initPart2();
     void updateProxySettings();
+    // The body of connectClickImpl; re-entered for the same request (after the previous session has
+    // ended, after a node evacuation) without taking the proxy settings again.
+    void connectImpl(const LocationID &locationId, const types::ConnectionSettings &connectionSettings, const QPair<QString, QString> &pinnedNode);
+    // The proxy settings of the request in progress (see RequestProxySettings), else the preference.
+    types::ProxySettings requestProxySettings() const;
+    RequestProxySettings requestProxySettings_;
 
 #ifdef Q_OS_WIN
     void enableDohSettings();

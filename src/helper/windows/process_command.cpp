@@ -798,8 +798,9 @@ std::string disableDnsLeaksProtection(const std::string &pars)
 {
     WS_DEBUG_TRACE_SCOPE("disableDnsLeaksProtection");
     int owner = static_cast<int>(DnsLeakFilterOwner::kConnection);
-    deserializePars(pars, owner);
-    return serializeResult(static_cast<int>(DnsFirewall::instance().disable(toDnsLeakFilterOwner(owner)) ? DnsLeakFilterResult::kApplied
+    bool keepRules = false;
+    deserializePars(pars, owner, keepRules);
+    return serializeResult(static_cast<int>(DnsFirewall::instance().disable(toDnsLeakFilterOwner(owner), keepRules) ? DnsLeakFilterResult::kApplied
                                                                               : DnsLeakFilterResult::kFailed));
 }
 

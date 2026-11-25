@@ -1075,6 +1075,18 @@ void Engine::sendConfirmEmailImpl()
 
 void Engine::connectClickImpl(const LocationID &locationId, const types::ConnectionSettings &connectionSettings, const QPair<QString, QString> &pinnedNode)
 {
+    // The proxy settings this request is made with, kept until the session ends.
+    requestProxySettings_.onRequest(ProxyServerController::instance().getCurrentProxySettings());
+    connectImpl(locationId, connectionSettings, pinnedNode);
+}
+
+types::ProxySettings Engine::requestProxySettings() const
+{
+    return requestProxySettings_.get(ProxyServerController::instance().getCurrentProxySettings());
+}
+
+void Engine::connectImpl(const LocationID &locationId, const types::ConnectionSettings &connectionSettings, const QPair<QString, QString> &pinnedNode)
+{
     locationId_ = locationId;
     connectionSettingsOverride_ = connectionSettings;
     pinnedNode_ = pinnedNode;
@@ -1084,7 +1096,7 @@ void Engine::connectClickImpl(const LocationID &locationId, const types::Connect
     // leave a proxied replacement without the filter. Runs again when this is re-entered after that
     // session has ended.
     if (proxiedDnsLeakFilter_) {
-        proxiedDnsLeakFilter_->onConnectRequest(ProxyServerController::instance().getCurrentProxySettings().isProxyEnabled(),
+        proxiedDnsLeakFilter_->onConnectRequest(requestProxySettings().isProxyEnabled(),
                                                 !connectionManager_->isDisconnected());
     }
 #endif
@@ -1152,7 +1164,7 @@ void Engine::connectClickImpl(const LocationID &locationId, const types::Connect
     // being retried in the background.
     // doConnect() builds the request with these proxy settings.
     if (proxiedDnsLeakFilter_ &&
-        !proxiedDnsLeakFilter_->mayConnect(ProxyServerController::instance().getCurrentProxySettings().isProxyEnabled())) {
+        !proxiedDnsLeakFilter_->mayConnect(requestProxySettings().isProxyEnabled())) {
         qCCritical(LOG_CONNECTION) << "DNS leak protection could not be set up, abort connection";
         connectStateController_->setDisconnectedState(DISCONNECTED_WITH_ERROR, ConnectError::kDnsLeakProtectionFailed);
         myIpManager_->getIP(1);
@@ -1759,7 +1771,7 @@ void Engine::onConnectionManagerDisconnected(DISCONNECT_REASON reason)
         // delays the UDP-based protocols and breaks IKEv2.  It restarts once reconnected.
         SplitTunnelExtensionManager::instance().stopExtension();
 #endif
-        connectClickImpl(locationId_, connectionSettingsOverride_, pinnedNode_);
+        connectImpl(locationId_, connectionSettingsOverride_, pinnedNode_);
         return;
     }
     else
@@ -2511,7 +2523,7 @@ void Engine::onNetworkChange(const types::NetworkInterface &networkInterface)
         connectionManager_->updateConnectionSettings(
             engineSettings_.connectionSettingsForNetworkInterface(networkInterface.networkOrSsid),
             portMap,
-            ProxyServerController::instance().getCurrentProxySettings());
+            requestProxySettings());
 
         if (helper_ && connectStateController_->currentState() == CONNECT_STATE_DISCONNECTED) {
             helper_->sendConnectStatus(false,
@@ -2885,7 +2897,7 @@ void Engine::evacuateForceDisconnectedNode(const QSet<int> &drainedNodeIds)
     // meanwhile: left set, an update landing in that window would evacuate again and kill the redial.
     lastConnectingNodeId_ = 0;
 
-    connectClickImpl(locationId_, connectionSettingsOverride_, pinnedNode_);
+    connectImpl(locationId_, connectionSettingsOverride_, pinnedNode_);
 }
 
 bool Engine::isApiAccessBlockedByAlwaysOnPlusFirewall() const
@@ -3040,7 +3052,8 @@ void Engine::doConnect(bool bEmitAuthError)
     req.wireGuard.amneziawgPreset = req.openVpn.amneziawgPreset;
     req.ipStackEgress = engineSettings_.ipStackEgress();
     req.bli = bli;
-    req.proxySettings = ProxyServerController::instance().getCurrentProxySettings();
+    // The settings the request was made with (also for a redial after fetching server credentials).
+    req.proxySettings = requestProxySettings();
     req.openVpn.proxySettings = req.proxySettings;
     req.bEmitAuthError = bEmitAuthError;
     req.preferredNodeHostname = pinnedNode_.first;
@@ -3203,6 +3216,10 @@ void Engine::onConnectStateChanged(CONNECT_STATE state, DISCONNECT_REASON reason
 #ifdef Q_OS_WIN
     updateProxiedDnsLeakProtection(state, reason);
 #endif
+    // A reconnect or location switch never passes through here; the request's settings last until then.
+    if (state == CONNECT_STATE_DISCONNECTED) {
+        requestProxySettings_.onSessionEnded();
+    }
 
 #ifdef Q_OS_MACOS
     // Tear the proxy down whenever the connection settles into disconnected; no-op when not running.
@@ -3261,8 +3278,7 @@ void Engine::updateProxiedDnsLeakProtection(CONNECT_STATE state, DISCONNECT_REAS
     // While not connected, Windscribe's own programs keep DNS (wsnet resolves the API and imported
     // hostnames itself, then goes through the proxy) and so do Exclusive-mode excluded apps such as
     // Throne; every other program is blocked from the adapters' resolvers and all local-network ones.
-    proxiedDnsLeakFilter_->onConnectState(state, ProxyServerController::instance().getCurrentProxySettings().isProxyEnabled(),
-                                          keepAfterSession);
+    proxiedDnsLeakFilter_->onConnectState(state, requestProxySettings().isProxyEnabled(), keepAfterSession);
 }
 
 firewall_policy::DnsLeakFilterSendResult Engine::sendProxiedDnsLeakFilter(firewall_policy::DnsLeakFilter filter)
@@ -3274,9 +3290,11 @@ firewall_policy::DnsLeakFilterSendResult Engine::sendProxiedDnsLeakFilter(firewa
     }
     // As the proxied session's owner: the helper then ignores a connector's requests (e.g. the previous
     // session's OpenVPN ending after a location switch) until the engine releases the filter.
+    // kHandedOver releases the filter but leaves its rules for the next connector to replace.
     const DnsLeakFilterResult result =
-        filter == DnsLeakFilter::kOff
-            ? helper_->disableDnsLeaksProtection(DnsLeakFilterOwner::kProxiedSession)
+        !firewall_policy::isEnginesDnsLeakFilter(filter)
+            ? helper_->disableDnsLeaksProtection(DnsLeakFilterOwner::kProxiedSession,
+                                                 filter == DnsLeakFilter::kHandedOver)
             : helper_->enableDnsLeaksProtection(filter == DnsLeakFilter::kPermitWindscribeApps,
                                                 DnsLeakFilterOwner::kProxiedSession);
     switch (result) {

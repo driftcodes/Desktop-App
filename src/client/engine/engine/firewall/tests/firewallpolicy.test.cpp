@@ -5,6 +5,7 @@
 #include "engine/firewall/firewallcontroller.h"
 #include "engine/firewall/firewallexceptions.h"
 #include "engine/firewall/firewallpolicy.h"
+#include "engine/requestproxysettings.h"
 #include "types/proxysettings.h"
 #include "utils/hardcodedsettings.h"
 #include "../../../../../helper/common/dns_filter_ownership.h"
@@ -294,9 +295,12 @@ struct FakeDnsLeakFilterHelper
                 using firewall_policy::DnsLeakFilterSendResult;
                 sent << f;
                 const auto answer = answers.isEmpty() ? DnsLeakFilterSendResult::kApplied : answers.takeFirst();
-                if (f == firewall_policy::DnsLeakFilter::kOff) {
+                if (!firewall_policy::isEnginesDnsLeakFilter(f)) {
                     if (!ownership.acceptDisable(DnsLeakFilterOwner::kProxiedSession)) {
                         return DnsLeakFilterSendResult::kApplied;  // a connector's filter: ignored
+                    }
+                    if (f == firewall_policy::DnsLeakFilter::kHandedOver) {
+                        return answer;  // let go, rules left in place
                     }
                 } else {
                     ownership.acceptEnable(DnsLeakFilterOwner::kProxiedSession);
@@ -522,16 +526,19 @@ void TestFirewallPolicy::testNewUnproxiedSessionAfterErrorTakesOverFilter()
     QCOMPARE(helper.inPlace, DnsLeakFilter::kPermitWindscribeApps);
 
     // The proxy is turned off and a new session starts: it is not a reconnect of the proxied one. The
-    // engine hands the filter over; the connector then manages it alone.
+    // engine hands the filter over with its rules left in place; the connector replaces them.
     filter.onConnectState(CONNECT_STATE_CONNECTING, false, false);
-    QCOMPARE(filter.wanted(), DnsLeakFilter::kOff);
-    QCOMPARE(helper.inPlace, DnsLeakFilter::kOff);
+    QCOMPARE(filter.wanted(), DnsLeakFilter::kHandedOver);
+    QCOMPARE(helper.inPlace, DnsLeakFilter::kPermitWindscribeApps);
+    QVERIFY(!helper.ownership.hasOwner());
+    QVERIFY(filter.mayConnect(false));
+    QVERIFY(filter.mayStartAttempt(false));
     helper.connectorStarts();
     QCOMPARE(helper.inPlace, DnsLeakFilter::kBlockAll);
     QCOMPARE(helper.ownership.owner(), DnsLeakFilterOwner::kConnection);
-    const int sentBefore = helper.sent.size();
+    // Connected: the engine's clean-up of leftover rules is ignored, the connector's stay.
     filter.onConnectState(CONNECT_STATE_CONNECTED, false, false);
-    QCOMPARE(helper.sent.size(), sentBefore);  // the engine stays out of it
+    QCOMPARE(filter.wanted(), DnsLeakFilter::kOff);
     QCOMPARE(helper.inPlace, DnsLeakFilter::kBlockAll);
     filter.onConnectState(CONNECT_STATE_DISCONNECTING, false, false);
     helper.connectorEnds();
@@ -546,7 +553,7 @@ void TestFirewallPolicy::testNewUnproxiedSessionAfterErrorTakesOverFilter()
     filter2.onConnectState(CONNECT_STATE_DISCONNECTED, true, true);
     failing.answers = {DnsLeakFilterSendResult::kFailed};
     filter2.onConnectState(CONNECT_STATE_CONNECTING, false, false);
-    QCOMPARE(failing.inPlace, DnsLeakFilter::kPermitWindscribeApps);  // removal failed, rules whole
+    QCOMPARE(failing.inPlace, DnsLeakFilter::kPermitWindscribeApps);  // rules left in place
     QCOMPARE(failing.retries.size(), 1);
     failing.connectorStarts();
     QCOMPARE(failing.inPlace, DnsLeakFilter::kBlockAll);
@@ -637,6 +644,7 @@ void TestFirewallPolicy::testDirectRequestReplacingProxiedSession()
 
         // The proxy is turned off and another profile picked. While the proxied session is still
         // being torn down it keeps its filter.
+        const int historyBefore = helper.history.size();
         filter.onConnectState(CONNECT_STATE_CONNECTING, false, false);
         filter.onConnectRequest(false, true);
         QVERIFY(helper.inPlace != DnsLeakFilter::kOff);
@@ -648,7 +656,26 @@ void TestFirewallPolicy::testDirectRequestReplacingProxiedSession()
         QCOMPARE(helper.inPlace, DnsLeakFilter::kBlockAll);
         QCOMPARE(helper.ownership.owner(), DnsLeakFilterOwner::kConnection);
         filter.onConnectState(CONNECT_STATE_CONNECTED, false, false);
+        QCOMPARE(helper.inPlace, DnsLeakFilter::kBlockAll);
+        // No moment without a filter from the old session to the new one being connected.
+        for (int i = historyBefore; i < helper.history.size(); ++i) {
+            QVERIFY(helper.history[i] != DnsLeakFilter::kOff);
+        }
         helper.connectorEnds();
+        QCOMPARE(helper.inPlace, DnsLeakFilter::kOff);
+    }
+    // The direct connection fails before its connector starts: the handed-over rules are removed
+    // when the session ends.
+    {
+        FakeDnsLeakFilterHelper helper;
+        auto filter = helper.makeController();
+        filter.onConnectRequest(true, false);
+        filter.onConnectState(CONNECT_STATE_CONNECTING, true, false);
+        filter.onConnectState(CONNECT_STATE_CONNECTED, true, false);
+        filter.onConnectState(CONNECT_STATE_CONNECTING, false, false);
+        filter.onConnectRequest(false, false);
+        QVERIFY(helper.inPlace != DnsLeakFilter::kOff);
+        filter.onConnectState(CONNECT_STATE_DISCONNECTED, false, true);
         QCOMPARE(helper.inPlace, DnsLeakFilter::kOff);
     }
     // The old session's reconnect rules cannot be installed: the new direct request is not refused
@@ -680,6 +707,43 @@ void TestFirewallPolicy::testDirectRequestReplacingProxiedSession()
         QCOMPARE(helper.inPlace, DnsLeakFilter::kPermitWindscribeApps);
         QCOMPARE(helper.ownership.owner(), DnsLeakFilterOwner::kProxiedSession);
     }
+}
+
+void TestFirewallPolicy::testRequestKeepsProxyChosenAtSelection()
+{
+    using namespace firewall_policy;
+    const types::ProxySettings throne(PROXY_OPTION_HTTP, "127.0.0.1", 2080, "", "");
+    const types::ProxySettings none;
+    QVERIFY(!none.isProxyEnabled());
+
+    RequestProxySettings request;
+    FakeDnsLeakFilterHelper helper;
+    auto filter = helper.makeController();
+    // A direct session is connected; its connector holds the filter.
+    filter.onConnectState(CONNECT_STATE_CONNECTING, false, false);
+    helper.connectorStarts();
+    filter.onConnectState(CONNECT_STATE_CONNECTED, false, false);
+
+    // A profile is picked with Throne enabled (connectClickImpl).
+    request.onRequest(throne);
+    filter.onConnectRequest(request.get(throne).isProxyEnabled(), true);
+    // While the old session is torn down, the proxy is turned off in Preferences.
+    helper.connectorEnds();
+    // Re-entry after the old session ended, the request built, a credential-refresh redial: all with
+    // the settings the profile was picked with.
+    const types::ProxySettings used = request.get(none);
+    QVERIFY(used.isProxyEnabled());
+    QCOMPARE(used.address(), QString("127.0.0.1"));
+    QCOMPARE(used.getPort(), static_cast<uint>(2080));
+    filter.onConnectRequest(used.isProxyEnabled(), false);
+    QVERIFY(filter.mayConnect(used.isProxyEnabled()));
+    QVERIFY(filter.mayStartAttempt(used.isProxyEnabled()));
+    QCOMPARE(helper.inPlace, DnsLeakFilter::kPermitWindscribeApps);
+    QCOMPARE(helper.ownership.owner(), DnsLeakFilterOwner::kProxiedSession);
+
+    // Once the session is over, the next request takes the preference as it is then.
+    request.onSessionEnded();
+    QVERIFY(!request.get(none).isProxyEnabled());
 }
 
 QTEST_MAIN(TestFirewallPolicy)

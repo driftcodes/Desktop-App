@@ -108,12 +108,17 @@ private:
 
 } // namespace
 
-bool DnsFirewall::disable(DnsLeakFilterOwner requester)
+bool DnsFirewall::disable(DnsLeakFilterOwner requester, bool keepRules)
 {
     std::lock_guard<std::recursive_mutex> guard(mutex_);
     if (!requests_.acceptDisable(requester)) {
         spdlog::info("DnsFirewall::disable() from {} ignored: the filter belongs to {}", static_cast<int>(requester),
                      static_cast<int>(requests_.ownership().owner()));
+        return true;
+    }
+    if (keepRules) {
+        spdlog::info("DnsFirewall: handed over by {}; rules stay until the next owner replaces them",
+                     static_cast<int>(requester));
         return true;
     }
     HANDLE hEngine = fwmpWrapper_.getHandleAndLock();

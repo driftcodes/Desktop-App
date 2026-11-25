@@ -97,7 +97,13 @@ Emergency Connect is unchanged and never uses the proxy.
     the proxy setting of the connection you pick, decided the moment you pick it (also while the
     previous one still shows Connecting): a proxied one takes the filter at once; one without a proxy
     lets the previous session keep it until that session has ended, then hands it to its own OpenVPN
-    (also after a proxied session ended with an error).
+    (also after a proxied session ended with an error). The hand-over leaves the rules in place until
+    that OpenVPN replaces them, so there is no moment without a filter in either direction.
+  - **The proxy setting is taken when you pick a location.** Everything that request leads to (the
+    connection after the previous one has ended, a retry after fetching server credentials, the
+    filter's hand-over) uses the proxy settings it was made with. Turning the proxy off while the
+    previous connection is still ending does not turn a profile you picked with Throne into a direct
+    connection; pick it again for that.
   - Removing an app from the Exclusive exclusions takes away its DNS permit too; if that rebuild fails,
     the helper retries until the permit is gone.
 
