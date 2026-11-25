@@ -43,10 +43,11 @@ public:
 
     void clickConnect(const ConnectRequest &req);
 
-    // Asked before every attempt, including the retries and reconnects this class starts on its own.
-    // false ends the session with ConnectError::kDnsLeakProtectionFailed. Engine uses it on Windows
-    // to require the proxied DNS leak filter's not-connected rules.
-    void setAttemptGate(std::function<bool()> gate) { attemptGate_ = std::move(gate); }
+    // Asked before every attempt, including the retries and reconnects this class starts on its own,
+    // with whether the attempt uses the proxy (from the request being dialed). false ends the session
+    // with ConnectError::kDnsLeakProtectionFailed. Engine uses it on Windows to require the proxied
+    // DNS leak filter's not-connected rules.
+    void setAttemptGate(std::function<bool(bool isProxied)> gate) { attemptGate_ = std::move(gate); }
 
     void clickDisconnect(DISCONNECT_REASON reason = DISCONNECTED_BY_USER);
     void reconnect();
@@ -142,7 +143,7 @@ private slots:
     void onHostnamesResolved();
 
 private:
-    std::function<bool()> attemptGate_;
+    std::function<bool(bool isProxied)> attemptGate_;
 #ifdef WINDSCRIBE_BUILD_TESTS
     // Tests use real QTimers: they read timer state directly and simulate expiry by invoking the
     // timeout slots (stopping single-shot timers first, matching what a real expiry leaves behind).

@@ -293,6 +293,30 @@ void testRemovedExclusionRetriedAfterFailedRebuild()
     VERIFY(tracker.needsRebuild());
 }
 
+void testRejectedRequestKeepsOwnersExceptions()
+{
+    scoped_permits::DnsFilterRequests requests;
+    // The engine holds the filter for a proxied session, with no custom DNS exception.
+    VERIFY(requests.acceptEnable(DnsLeakFilterOwner::kProxiedSession, true, {}));
+    // The previous session's connector asks to enable with its own exception list: rejected, and
+    // nothing it carried is taken.
+    VERIFY(!requests.acceptEnable(DnsLeakFilterOwner::kConnection, false, {ip("192.168.1.1")}));
+    VERIFY(requests.excluded().empty());
+    VERIFY(requests.permitApps());
+    VERIFY(requests.isWanted());
+    // Its disable is rejected too.
+    VERIFY(!requests.acceptDisable(DnsLeakFilterOwner::kConnection));
+    VERIFY(requests.isWanted());
+    // So a later rebuild (e.g. after a resolver change) still blocks that router.
+    const auto rules = scoped_permits::dnsFilterRules({ip("192.168.1.1")}, requests.excluded(), false, 0);
+    VERIFY(covers(rules, ip("192.168.1.1"), false));
+
+    // The owner's own request does change them.
+    VERIFY(requests.acceptEnable(DnsLeakFilterOwner::kProxiedSession, false, {ip("1.1.1.1")}));
+    VERIFY(requests.excluded().count(ip("1.1.1.1")) == 1);
+    VERIFY(!requests.permitApps());
+}
+
 } // namespace
 
 int main()
@@ -305,6 +329,7 @@ int main()
     testFirstEnableWithUnreadableAdaptersStillBlocks();
     testResolverChangeOnSameWifiWhileConnected();
     testRemovedExclusionRetriedAfterFailedRebuild();
+    testRejectedRequestKeepsOwnersExceptions();
     if (g_failures == 0) {
         printf("All scoped permit tests passed.\n");
     }

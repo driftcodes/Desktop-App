@@ -20,6 +20,7 @@ private slots:
     void testReconnectNeedsNotConnectedRules();
     void testLocationSwitchFromUnproxiedKeepsNewRules();
     void testNewUnproxiedSessionAfterErrorTakesOverFilter();
+    void testProxiedRequestReplacingAttemptStillConnecting();
     void testRetryBacksOffAndStopsOnSuccess();
     void testDnsLeakFilterKeptAfterErrorUntilFirewallOff();
 };

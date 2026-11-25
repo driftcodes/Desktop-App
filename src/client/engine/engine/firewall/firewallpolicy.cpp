@@ -130,8 +130,21 @@ void ProxiedDnsLeakFilter::onRetry(quint64 token)
     }
 }
 
-bool ProxiedDnsLeakFilter::mayConnect()
+void ProxiedDnsLeakFilter::claimForProxiedRequest(bool isProxied)
 {
+    if (isProxied && wanted_ == DnsLeakFilter::kOff) {
+        // E.g. the proxy turned on and another location picked while an attempt without it was still
+        // CONNECTING: no CONNECTING arrives for the replacement, and its OpenVPN leaves the filter to
+        // the engine. The previous connector's teardown is then ignored by the helper.
+        wanted_ = DnsLeakFilter::kPermitWindscribeApps;
+        retryDelayMs_ = kFirstRetryMs;
+        send();
+    }
+}
+
+bool ProxiedDnsLeakFilter::mayConnect(bool isProxied)
+{
+    claimForProxiedRequest(isProxied);
     if (wanted_ == DnsLeakFilter::kOff || confirmed_ == wanted_) {
         return true;
     }
@@ -139,15 +152,16 @@ bool ProxiedDnsLeakFilter::mayConnect()
     return confirmed_ == wanted_;
 }
 
-bool ProxiedDnsLeakFilter::mayStartAttempt()
+bool ProxiedDnsLeakFilter::mayStartAttempt(bool isProxied)
 {
+    claimForProxiedRequest(isProxied);
     if (wanted_ == DnsLeakFilter::kBlockAll) {
         // The connection manager retries before the engine has seen the reconnect.
         wanted_ = DnsLeakFilter::kPermitWindscribeApps;
         retryDelayMs_ = kFirstRetryMs;
         send();
     }
-    return mayConnect();
+    return mayConnect(isProxied);
 }
 
 void ProxiedDnsLeakFilter::apply(const DnsLeakFilterStep &step)

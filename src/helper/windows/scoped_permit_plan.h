@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "types/ipaddress.h"
+#include "../common/dns_filter_ownership.h"
 
 // Which program-scoped firewall rules to install, and how the DNS leak filter's rules are replaced,
 // kept free of WFP so it can be unit-tested.
@@ -208,6 +209,43 @@ private:
     Apps requested_ {};
     Apps applied_ {};
     bool isApplied_ = false;
+};
+
+// What the DNS leak filter's owner asked for. A request is checked against the owner first, under the
+// caller's lock, and only an accepted one changes anything it carries: a connector's request ignored
+// while the engine holds the filter cannot swap the owner's custom DNS exceptions either.
+class DnsFilterRequests
+{
+public:
+    bool acceptEnable(DnsLeakFilterOwner requester, bool permitApps, const std::set<types::IpAddress> &excluded)
+    {
+        if (!ownership_.acceptEnable(requester)) {
+            return false;
+        }
+        isWanted_ = true;
+        permitApps_ = permitApps;
+        excluded_ = excluded;
+        return true;
+    }
+    bool acceptDisable(DnsLeakFilterOwner requester)
+    {
+        if (!ownership_.acceptDisable(requester)) {
+            return false;
+        }
+        isWanted_ = false;
+        return true;
+    }
+
+    bool isWanted() const { return isWanted_; }
+    bool permitApps() const { return permitApps_; }
+    const std::set<types::IpAddress> &excluded() const { return excluded_; }
+    const DnsLeakFilterOwnership &ownership() const { return ownership_; }
+
+private:
+    DnsLeakFilterOwnership ownership_;
+    bool isWanted_ = false;
+    bool permitApps_ = false;
+    std::set<types::IpAddress> excluded_;
 };
 
 } // namespace scoped_permits

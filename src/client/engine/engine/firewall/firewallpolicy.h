@@ -87,16 +87,20 @@ public:
     // the filter has not been the engine's since (a connector without a proxy managed it).
     DnsLeakFilter confirmed() const { return confirmed_; }
     bool isBlockConfirmed() const { return confirmed_ != DnsLeakFilter::kOff; }
-    // Whether a proxied connection may start: the filter is not the engine's, or the helper has
-    // confirmed exactly the wanted rules. If not, it asks the helper once more first.
-    bool mayConnect();
-    // Before every attempt of a proxied session, the first and each retry the connection manager
-    // starts on its own: an attempt is not connected, so it needs the not-connected rules (local
-    // ranges blocked, no custom DNS exception) confirmed, not the connected ones still in place.
-    bool mayStartAttempt();
+    // isProxied: whether the request being started uses the proxy (its own settings, not the connect
+    // state: a request replacing an attempt still CONNECTING brings no new CONNECTING). A proxied
+    // request while the filter is not the engine's makes the engine take it over first.
+    // Whether a connection may start: the filter is not the engine's, or the helper has confirmed
+    // exactly the wanted rules. If not, it asks the helper once more first.
+    bool mayConnect(bool isProxied);
+    // Before every attempt, the first and each retry the connection manager starts on its own: an
+    // attempt is not connected, so a proxied session needs the not-connected rules (local ranges
+    // blocked, no custom DNS exception) confirmed, not the connected ones still in place.
+    bool mayStartAttempt(bool isProxied);
 
 private:
     void apply(const DnsLeakFilterStep &step);
+    void claimForProxiedRequest(bool isProxied);
     void send();
 
     Send send_;

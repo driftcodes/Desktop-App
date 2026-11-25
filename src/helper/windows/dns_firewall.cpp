@@ -111,12 +111,11 @@ private:
 bool DnsFirewall::disable(DnsLeakFilterOwner requester)
 {
     std::lock_guard<std::recursive_mutex> guard(mutex_);
-    if (!ownership_.acceptDisable(requester)) {
+    if (!requests_.acceptDisable(requester)) {
         spdlog::info("DnsFirewall::disable() from {} ignored: the filter belongs to {}", static_cast<int>(requester),
-                     static_cast<int>(ownership_.owner()));
+                     static_cast<int>(requests_.ownership().owner()));
         return true;
     }
-    bWanted_ = false;
     HANDLE hEngine = fwmpWrapper_.getHandleAndLock();
 
     bool isRemoved = false;
@@ -152,23 +151,22 @@ bool DnsFirewall::disable(DnsLeakFilterOwner requester)
     return isRemoved;
 }
 
-DnsLeakFilterResult DnsFirewall::enable(bool permitApps, DnsLeakFilterOwner requester)
+DnsLeakFilterResult DnsFirewall::enable(bool permitApps, DnsLeakFilterOwner requester,
+                                        const std::set<types::IpAddress> &excludeIps)
 {
     std::lock_guard<std::recursive_mutex> guard(mutex_);
-    if (!ownership_.acceptEnable(requester)) {
+    if (!requests_.acceptEnable(requester, permitApps, excludeIps)) {
         spdlog::info("DnsFirewall::enable() from {} ignored: the filter belongs to {}", static_cast<int>(requester),
-                     static_cast<int>(ownership_.owner()));
+                     static_cast<int>(requests_.ownership().owner()));
         return DnsLeakFilterResult::kApplied;
     }
     startMonitor();
-    return enableImpl(permitApps);
+    return enableImpl();
 }
 
-DnsLeakFilterResult DnsFirewall::enableImpl(bool permitApps)
+DnsLeakFilterResult DnsFirewall::enableImpl()
 {
-    bWanted_ = true;
-    bWantedPermitApps_ = permitApps;
-
+    const bool permitApps = requests_.permitApps();
     AppsIds permittedApps;
     if (permitApps) {
         permittedApps = permittedApps_.requested();
@@ -178,7 +176,7 @@ DnsLeakFilterResult DnsFirewall::enableImpl(bool permitApps)
     }
     std::set<types::IpAddress> dnsServers;
     const bool serversKnown = getDnsServers(dnsServers);
-    const auto plan = scoped_permits::planDnsRules(serversKnown, dnsServers, appliedServers_, excludeIps_, permitApps,
+    const auto plan = scoped_permits::planDnsRules(serversKnown, dnsServers, appliedServers_, requests_.excluded(), permitApps,
                                                    permittedApps.count());
 
     HANDLE hEngine = fwmpWrapper_.getHandleAndLock();
@@ -211,18 +209,6 @@ DnsLeakFilterResult DnsFirewall::enableImpl(bool permitApps)
     return DnsLeakFilterResult::kApplied;
 }
 
-void DnsFirewall::setExcludeIps(const std::vector<std::wstring>& ips)
-{
-    std::lock_guard<std::recursive_mutex> guard(mutex_);
-    excludeIps_.clear();
-    for (const auto &w : ips) {
-        types::IpAddress addr(w);
-        if (addr.isValid()) {
-            excludeIps_.insert(addr);
-        }
-    }
-}
-
 void DnsFirewall::setWindscribeAppsIds(const AppsIds &appsIds)
 {
     std::lock_guard<std::recursive_mutex> guard(mutex_);
@@ -243,8 +229,8 @@ void DnsFirewall::updatePermittedApps()
     permitted.addFrom(excludedAppsIds_);
     // Compared with the programs of the rules in place, not with the last request: after a failed
     // rebuild the old permits are still there, so the same list sent again must still rebuild.
-    if (permittedApps_.request(permitted) && bWanted_ && bWantedPermitApps_) {
-        enableImpl(true);  // on failure isDirty_ is set and the monitor retries
+    if (permittedApps_.request(permitted) && requests_.isWanted() && requests_.permitApps()) {
+        enableImpl();  // on failure isDirty_ is set and the monitor retries
     }
 }
 
@@ -331,17 +317,17 @@ void DnsFirewall::monitorThread()
 void DnsFirewall::checkForChanges()
 {
     std::lock_guard<std::recursive_mutex> guard(mutex_);
-    if (!bWanted_) {
+    if (!requests_.isWanted()) {
         return;
     }
     std::set<types::IpAddress> servers;
     const bool serversKnown = getDnsServers(servers);
     const bool serversChanged = scoped_permits::dnsServersChanged(serversKnown, servers, appliedServers_);
-    const bool appsChanged = bWantedPermitApps_ && permittedApps_.needsRebuild();
+    const bool appsChanged = requests_.permitApps() && permittedApps_.needsRebuild();
     if (isDirty_ || serversChanged || appsChanged) {
         spdlog::info("DnsFirewall: rebuilding (retry: {}, DNS servers changed: {}, programs changed: {})", isDirty_,
                      serversChanged, appsChanged);
-        enableImpl(bWantedPermitApps_);
+        enableImpl();
     }
 }
 

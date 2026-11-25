@@ -781,9 +781,17 @@ std::string enableDnsLeaksProtection(const std::string &pars)
                                      }),
                       customDnsIp.end());
 
-    DnsFirewall::instance().setExcludeIps(customDnsIp);
+    std::set<types::IpAddress> excludeIps;
+    for (const auto &ip : customDnsIp) {
+        types::IpAddress addr(ip);
+        if (addr.isValid()) {
+            excludeIps.insert(addr);
+        }
+    }
+    // The exceptions go in with the request, so one the owner check rejects cannot replace them.
     // kFailed: the previous rules stay; kIncomplete: blocks in, the helper retries the rest.
-    return serializeResult(static_cast<int>(DnsFirewall::instance().enable(permitWindscribeApps, toDnsLeakFilterOwner(owner))));
+    return serializeResult(static_cast<int>(
+        DnsFirewall::instance().enable(permitWindscribeApps, toDnsLeakFilterOwner(owner), excludeIps)));
 }
 
 std::string disableDnsLeaksProtection(const std::string &pars)

@@ -746,7 +746,8 @@ void ConnectionManager::startAttempt()
     }
 
     // Before anything of the attempt reaches the network (hostname lookups included).
-    if (attemptGate_ && !attemptGate_()) {
+    const bool isProxiedAttempt = lastRequest_.proxySettings.isProxyEnabled() && !lastRequest_.openVpn.isEmergencyConnect;
+    if (attemptGate_ && !attemptGate_(isProxiedAttempt)) {
         qCCritical(LOG_CONNECTION) << "DNS leak protection is not in place for this attempt, stopping";
         failWithError(ConnectError::kDnsLeakProtectionFailed);
         return;

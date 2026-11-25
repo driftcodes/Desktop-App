@@ -329,21 +329,21 @@ void TestFirewallPolicy::testFirstConnectHeldUntilBlockConfirmed()
     QCOMPARE(filter.wanted(), DnsLeakFilter::kPermitWindscribeApps);
     QVERIFY(!filter.isBlockConfirmed());
     QCOMPARE(helper.inPlace, DnsLeakFilter::kOff);  // no block at all
-    QVERIFY(!filter.mayConnect());                  // the connection is held
+    QVERIFY(!filter.mayConnect(true));                  // the connection is held
     QCOMPARE(helper.sent.size(), 2);                // it asked once more first
     QVERIFY(!helper.retries.isEmpty());             // and keeps retrying
 
     // The retry gets the blocks in: the next connect may go ahead.
     filter.onRetry(helper.retries.last().first);
     QVERIFY(filter.isBlockConfirmed());
-    QVERIFY(filter.mayConnect());
+    QVERIFY(filter.mayConnect(true));
 
     // Blocks in but a permit missing: blocks are what matters for connecting.
     FakeDnsLeakFilterHelper partial;
     partial.answers = {DnsLeakFilterSendResult::kIncomplete};
     auto filter2 = partial.makeController();
     filter2.onConnectState(CONNECT_STATE_CONNECTING, true, false);
-    QVERIFY(filter2.mayConnect());
+    QVERIFY(filter2.mayConnect(true));
     QCOMPARE(partial.sent.size(), 1);
     QCOMPARE(partial.retries.size(), 1);  // the rest is still retried
 
@@ -360,7 +360,7 @@ void TestFirewallPolicy::testFirstConnectHeldUntilBlockConfirmed()
     FakeDnsLeakFilterHelper none;
     auto filter4 = none.makeController();
     filter4.onConnectState(CONNECT_STATE_CONNECTING, false, false);
-    QVERIFY(filter4.mayConnect());
+    QVERIFY(filter4.mayConnect(false));
     QVERIFY(none.sent.isEmpty());
 }
 
@@ -401,10 +401,10 @@ void TestFirewallPolicy::testStaleRetryDoesNotUndoUnproxiedSession()
     // confirmation.
     helper.answers = {DnsLeakFilterSendResult::kFailed, DnsLeakFilterSendResult::kFailed};
     filter.onConnectState(CONNECT_STATE_CONNECTING, true, false);
-    QVERIFY(!filter.mayConnect());
+    QVERIFY(!filter.mayConnect(true));
     QCOMPARE(helper.inPlace, DnsLeakFilter::kOff);
     // Once the helper confirms, it may.
-    QVERIFY(filter.mayConnect());
+    QVERIFY(filter.mayConnect(true));
     QCOMPARE(helper.inPlace, DnsLeakFilter::kPermitWindscribeApps);
 }
 
@@ -414,7 +414,7 @@ void TestFirewallPolicy::testReconnectNeedsNotConnectedRules()
     FakeDnsLeakFilterHelper helper;
     auto filter = helper.makeController();
     filter.onConnectState(CONNECT_STATE_CONNECTING, true, false);
-    QVERIFY(filter.mayStartAttempt());
+    QVERIFY(filter.mayStartAttempt(true));
     filter.onConnectState(CONNECT_STATE_CONNECTED, true, false);
     QCOMPARE(filter.confirmed(), DnsLeakFilter::kBlockAll);  // connected rules in place
 
@@ -425,8 +425,8 @@ void TestFirewallPolicy::testReconnectNeedsNotConnectedRules()
     filter.onConnectState(CONNECT_STATE_CONNECTING, true, false);
     QCOMPARE(helper.inPlace, DnsLeakFilter::kBlockAll);
     QVERIFY(filter.isBlockConfirmed());
-    QVERIFY(!filter.mayStartAttempt());  // the connection manager's own retry is stopped
-    QVERIFY(filter.mayStartAttempt());   // after the helper confirms, it goes ahead
+    QVERIFY(!filter.mayStartAttempt(true));  // the connection manager's own retry is stopped
+    QVERIFY(filter.mayStartAttempt(true));   // after the helper confirms, it goes ahead
     QCOMPARE(helper.inPlace, DnsLeakFilter::kPermitWindscribeApps);
 
     // The connection manager retrying before the engine has seen the reconnect (state still
@@ -434,15 +434,15 @@ void TestFirewallPolicy::testReconnectNeedsNotConnectedRules()
     filter.onConnectState(CONNECT_STATE_CONNECTED, true, false);
     QCOMPARE(filter.confirmed(), DnsLeakFilter::kBlockAll);
     helper.answers = {DnsLeakFilterSendResult::kFailed, DnsLeakFilterSendResult::kFailed};
-    QVERIFY(!filter.mayStartAttempt());
+    QVERIFY(!filter.mayStartAttempt(true));
     QCOMPARE(filter.wanted(), DnsLeakFilter::kPermitWindscribeApps);
-    QVERIFY(filter.mayStartAttempt());
+    QVERIFY(filter.mayStartAttempt(true));
 
     // Sessions without a proxy are never stopped here.
     FakeDnsLeakFilterHelper none;
     auto plain = none.makeController();
     plain.onConnectState(CONNECT_STATE_CONNECTING, false, false);
-    QVERIFY(plain.mayStartAttempt());
+    QVERIFY(plain.mayStartAttempt(false));
     QVERIFY(none.sent.isEmpty());
 }
 
@@ -488,7 +488,7 @@ void TestFirewallPolicy::testLocationSwitchFromUnproxiedKeepsNewRules()
     helper.connectorEnds();
     QCOMPARE(helper.inPlace, DnsLeakFilter::kPermitWindscribeApps);
     // The new attempt goes ahead with the rules really in place.
-    QVERIFY(filter.mayStartAttempt());
+    QVERIFY(filter.mayStartAttempt(true));
     QCOMPARE(helper.inPlace, filter.confirmed());
 
     // Through to the end of the proxied session.
@@ -552,6 +552,57 @@ void TestFirewallPolicy::testNewUnproxiedSessionAfterErrorTakesOverFilter()
     filter3.onConnectState(CONNECT_STATE_CONNECTING, false, false);
     QCOMPARE(filter3.wanted(), DnsLeakFilter::kPermitWindscribeApps);
     QCOMPARE(reconnect.inPlace, DnsLeakFilter::kPermitWindscribeApps);
+}
+
+void TestFirewallPolicy::testProxiedRequestReplacingAttemptStillConnecting()
+{
+    using namespace firewall_policy;
+    // The engine's connect check sees the replacement request first.
+    {
+        FakeDnsLeakFilterHelper helper;
+        auto filter = helper.makeController();
+        // An attempt without a proxy is still CONNECTING; its connector holds the filter.
+        filter.onConnectState(CONNECT_STATE_CONNECTING, false, false);
+        helper.connectorStarts();
+        QCOMPARE(helper.inPlace, DnsLeakFilter::kBlockAll);
+
+        // The proxy is turned on and another profile picked: the state stays CONNECTING, so no new
+        // CONNECTING arrives. The replacement request is proxied.
+        QVERIFY(filter.mayConnect(true));
+        QCOMPARE(filter.wanted(), DnsLeakFilter::kPermitWindscribeApps);
+        QCOMPARE(helper.inPlace, DnsLeakFilter::kPermitWindscribeApps);
+
+        // The old connector ends: ignored. The new (proxied) one does not touch the filter.
+        helper.connectorEnds();
+        QVERIFY(filter.mayStartAttempt(true));
+        QCOMPARE(helper.inPlace, DnsLeakFilter::kPermitWindscribeApps);
+        filter.onConnectState(CONNECT_STATE_CONNECTED, true, false);
+        QCOMPARE(helper.inPlace, DnsLeakFilter::kBlockAll);
+        filter.onConnectState(CONNECT_STATE_DISCONNECTING, true, false);
+        filter.onConnectState(CONNECT_STATE_DISCONNECTED, true, false);
+        QCOMPARE(helper.inPlace, DnsLeakFilter::kOff);
+    }
+    // Only the connection manager's per-attempt check sees it (its own redial with the new request).
+    {
+        FakeDnsLeakFilterHelper helper;
+        auto filter = helper.makeController();
+        filter.onConnectState(CONNECT_STATE_CONNECTING, false, false);
+        helper.connectorStarts();
+        helper.connectorEnds();  // the old connector is already gone
+        QCOMPARE(helper.inPlace, DnsLeakFilter::kOff);
+        QVERIFY(filter.mayStartAttempt(true));
+        QCOMPARE(helper.inPlace, DnsLeakFilter::kPermitWindscribeApps);
+        QCOMPARE(helper.sent.size(), 1);
+    }
+    // And if the helper cannot install it, the attempt is stopped.
+    {
+        FakeDnsLeakFilterHelper helper;
+        auto filter = helper.makeController();
+        filter.onConnectState(CONNECT_STATE_CONNECTING, false, false);
+        helper.answers = {DnsLeakFilterSendResult::kFailed, DnsLeakFilterSendResult::kFailed};
+        QVERIFY(!filter.mayStartAttempt(true));
+        QCOMPARE(helper.inPlace, DnsLeakFilter::kOff);
+    }
 }
 
 QTEST_MAIN(TestFirewallPolicy)

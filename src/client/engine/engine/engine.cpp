@@ -745,7 +745,7 @@ void Engine::initPart2()
                 }
             });
         });
-    connectionManager_->setAttemptGate([this]() { return proxiedDnsLeakFilter_->mayStartAttempt(); });
+    connectionManager_->setAttemptGate([this](bool isProxied) { return proxiedDnsLeakFilter_->mayStartAttempt(isProxied); });
     // A DNS leak filter kept after a proxied session ended goes off with the firewall.
     connect(this, &Engine::firewallStateChanged, this, [this](bool isEnabled) {
         if (!isEnabled) {
@@ -1140,7 +1140,9 @@ void Engine::connectClickImpl(const LocationID &locationId, const types::Connect
     // With a proxy set, connecting starts only once the helper has confirmed the DNS leak filter's
     // blocks: otherwise a router acting as DNS stays reachable through the LAN permit. The filter keeps
     // being retried in the background.
-    if (proxiedDnsLeakFilter_ && !proxiedDnsLeakFilter_->mayConnect()) {
+    // doConnect() builds the request with these proxy settings.
+    if (proxiedDnsLeakFilter_ &&
+        !proxiedDnsLeakFilter_->mayConnect(ProxyServerController::instance().getCurrentProxySettings().isProxyEnabled())) {
         qCCritical(LOG_CONNECTION) << "DNS leak protection could not be set up, abort connection";
         connectStateController_->setDisconnectedState(DISCONNECTED_WITH_ERROR, ConnectError::kDnsLeakProtectionFailed);
         myIpManager_->getIP(1);

@@ -36,18 +36,17 @@ public:
     // user's choice. Calling it again rebuilds the rules in one transaction, so the block never lapses;
     // a failed rebuild keeps the rules in place. While enabled, a monitor rebuilds the rules when the
     // adapters' DNS servers change (also on the same network) and retries a rebuild that failed.
-    DnsLeakFilterResult enable(bool permitApps, DnsLeakFilterOwner requester);
+    // excludeIps: the custom connected DNS addresses not blocked while connected; taken only if the
+    // request is the owner's.
+    DnsLeakFilterResult enable(bool permitApps, DnsLeakFilterOwner requester, const std::set<types::IpAddress> &excludeIps);
 
-    void setExcludeIps(const std::vector<std::wstring>& ips);
     void setWindscribeAppsIds(const AppsIds &appsIds);
     void setExcludedAppsIds(const AppsIds &appsIds);
 
 private:
     std::recursive_mutex mutex_;
-    DnsLeakFilterOwnership ownership_;
+    scoped_permits::DnsFilterRequests requests_;  // owner, and what it wants
     bool bCurrentState_;           // rules of this filter are in place
-    bool bWanted_ = false;         // the client wants the filter on ...
-    bool bWantedPermitApps_ = false;  // ... in this mode
     bool isDirty_ = false;         // the last rebuild failed or was incomplete
     AppsIds windscribeAppsIds_;
     AppsIds excludedAppsIds_;
@@ -55,13 +54,13 @@ private:
     std::set<types::IpAddress> appliedServers_;  // the adapters' DNS servers the rules in place cover
     GUID subLayerGUID_;
     FwpmWrapper &fwmpWrapper_;
-    std::set<types::IpAddress> excludeIps_;
 
     std::thread monitor_;
     HANDLE stopMonitorEvent_ = nullptr;
 
     explicit DnsFirewall(FwpmWrapper &fwmpWrapper);
-    DnsLeakFilterResult enableImpl(bool permitApps);
+    // Rebuilds the rules for what requests_ holds.
+    DnsLeakFilterResult enableImpl();
     void updatePermittedApps();
     // false when the adapters could not be read (an empty set is a valid answer).
     bool getDnsServers(std::set<types::IpAddress> &dnsServers);
