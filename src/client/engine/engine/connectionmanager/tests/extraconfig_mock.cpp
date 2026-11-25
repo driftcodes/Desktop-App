@@ -41,6 +41,9 @@ int ExtraConfig::getMtuOffsetWireguard(bool &success) { success = false; return 
 bool ExtraConfig::getIsTunnelTestNoError() { return ExtraConfigMock::tunnelTestNoError; }
 bool ExtraConfig::getOverrideUpdateChannelToInternal() { return false; }
 bool ExtraConfig::getIsStaging() { return false; }
+// Called by client-common's debug_trace.cpp on Windows only; without it the MSVC linker pulls the real
+// ExtraConfig object out of client-common.lib and every definition here becomes a duplicate.
+bool ExtraConfig::getDebugTrace() { return false; }
 bool ExtraConfig::getLogAPIResponse() { return false; }
 bool ExtraConfig::getLogCtrld() { return false; }
 bool ExtraConfig::getLogPings() { return false; }
