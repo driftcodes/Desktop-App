@@ -470,6 +470,10 @@ private:
     void addCustomRemoteIpToFirewallIfNeed();
     void doConnect(bool bEmitAuthError);
     void doDisconnectRestoreStuff();
+    // Puts the user's proxy back into wsnet (it is cleared while connected, when requests use the tunnel).
+    void restoreWsnetProxySettings();
+    // Firewall exceptions while not connected; see FirewallExceptions::getIPAddressesForNotConnectedState.
+    QSet<QString> firewallIpsWhileNotConnected() const;
 
     void stopFetchingServerCredentials();
 

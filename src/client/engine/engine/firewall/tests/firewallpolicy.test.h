@@ -1,0 +1,15 @@
+#pragma once
+
+#include <QObject>
+
+class TestFirewallPolicy : public QObject
+{
+    Q_OBJECT
+
+private slots:
+    void testNotConnectedExceptionsUnderProxy();
+    void testNotConnectedExceptionsWithoutProxy();
+    void testLeaveConnectionForgetsEndpointAndKeepsFirewallOn();
+    void testLeaveConnectionLeavesFirewallOff();
+    void testAfterConnectedDecision();
+};

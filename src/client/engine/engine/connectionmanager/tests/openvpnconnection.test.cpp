@@ -10,6 +10,7 @@
 #include "engine/connectionmanager/connectors/openvpn/makeovpnfile.h"
 #include "engine/connectionmanager/connectors/openvpn/openvpnconnection.h"
 #include "engine/customconfigs/ovpnroutingpolicy.h"
+#include "engine/firewall/firewallpolicy.h"
 #include "extraconfig_mock.h"
 #include "fakes.h"
 #include "types/enums.h"
@@ -575,22 +576,33 @@ CurrentConnectionDescr makeCustomDescr(types::Protocol::TYPE protocol, const QSt
 
 void TestOpenVPNConnection::testFirewallStaysOnWithLocalPrivateRoute()
 {
-    // The value the engine reads after connecting (ConnectionManager forwards it for custom configs):
-    // a full-tunnel profile that routes 10.0.0.0/8 locally keeps the automatic firewall.
-    OpenVPNConnection conn(nullptr, helper_, types::Protocol::OPENVPN_UDP, makeSessionParams());
-    conn.prepare(makeCustomDescr(types::Protocol::OPENVPN_UDP,
-                                 "dev tun\r\nredirect-gateway def1\r\nroute 10.0.0.0 255.0.0.0 net_gateway\r\n"
-                                 "remote 5.6.7.8 1194 udp\r\n"),
-                 makeEnv());
-    QVERIFY(conn.isAllowFirewallAfterConnectionRuntime());
-
-    // A public range routed locally is traffic the firewall would block, so it is not a full tunnel.
-    OpenVPNConnection publicHole(nullptr, helper_, types::Protocol::OPENVPN_UDP, makeSessionParams());
-    publicHole.prepare(makeCustomDescr(types::Protocol::OPENVPN_UDP,
-                                       "dev tun\r\nredirect-gateway def1\r\nroute 203.0.113.0 255.255.255.0 net_gateway\r\n"
-                                       "remote 5.6.7.8 1194 udp\r\n"),
-                       makeEnv());
-    QVERIFY(!publicHole.isAllowFirewallAfterConnectionRuntime());
+    // An imported TCP profile goes through the decision the engine takes once connected
+    // (firewall_policy::afterConnected), fed with the connector's own answer, starting from
+    // Automatic / Before Connection with the firewall on.
+    struct Case
+    {
+        QString routes;
+        firewall_policy::AutomaticAction expected;
+    };
+    const QVector<Case> cases = {
+        // Local 10.0.0.0/8: private, allowed off the tunnel for custom configs -> firewall stays on.
+        {"route 10.0.0.0 255.0.0.0 net_gateway\r\n", firewall_policy::AutomaticAction::None},
+        // Only Windscribe's in-tunnel DNS range routed locally: the firewall keeps blocking it -> stays on.
+        {"route 10.255.255.0 255.255.255.0 net_gateway\r\n", firewall_policy::AutomaticAction::None},
+        // A public /24 routed directly: the profile wants traffic the firewall would block -> turned off.
+        {"route 203.0.113.0 255.255.255.0 net_gateway\r\n", firewall_policy::AutomaticAction::TurnOff},
+    };
+    for (const Case &c : cases) {
+        OpenVPNConnection conn(nullptr, helper_, types::Protocol::OPENVPN_TCP, makeSessionParams());
+        conn.prepare(makeCustomDescr(types::Protocol::OPENVPN_TCP,
+                                     "dev tun\r\nredirect-gateway def1\r\n" + c.routes + "remote 5.6.7.8 443 tcp\r\n"),
+                     makeEnv());
+        // The engine combines the imported config's own flag (always true for OpenVPN) with this.
+        const bool tunnelCarriesAllTraffic = conn.isAllowFirewallAfterConnectionRuntime();
+        QCOMPARE(firewall_policy::afterConnected(FIREWALL_MODE_AUTOMATIC, FIREWALL_WHEN_BEFORE_CONNECTION, true,
+                                                 tunnelCarriesAllTraffic),
+                 c.expected);
+    }
 }
 
 void TestOpenVPNConnection::testLoopbackProxyRouteFixKeepsRoutingPolicy()

@@ -67,14 +67,8 @@ void FirewallExceptions::setCustomConfigPingIps(const QStringList &listIps)
     customConfigsPingIPs_ = listIps;
 }
 
-QSet<QString> FirewallExceptions::getIPAddressesForFirewall() const
+void FirewallExceptions::addDnsServers(UniqueIpList &ipList) const
 {
-    //WS_ASSERT(QApplication::instance()->thread() == QThread::currentThread());
-
-    UniqueIpList ipList;
-    ipList.add("127.0.0.1");
-
-    // add dns servers
     if (dnsPolicyType_ == DNS_TYPE_OS_DEFAULT) {
         std::vector<std::wstring> listDns = DnsUtils::getOSDefaultDnsServers();
         for (std::vector<std::wstring>::iterator it = listDns.begin(); it != listDns.end(); ++it) {
@@ -103,6 +97,19 @@ QSet<QString> FirewallExceptions::getIPAddressesForFirewall() const
         ipList.add(s);
     }
 
+    for (const QString &s : dnsIps_)
+            ipList.add(s);
+}
+
+QSet<QString> FirewallExceptions::getIPAddressesForFirewall() const
+{
+    //WS_ASSERT(QApplication::instance()->thread() == QThread::currentThread());
+
+    UniqueIpList ipList;
+    ipList.add("127.0.0.1");
+
+    addDnsServers(ipList);
+
     for (const QString &s : hostIPs_) {
         if (!s.isEmpty()) {
             ipList.add(s);
@@ -117,9 +124,6 @@ QSet<QString> FirewallExceptions::getIPAddressesForFirewall() const
         ipList.add(remoteIP_);
     }
 
-    for (const QString &s : dnsIps_)
-            ipList.add(s);
-
     for (const QString &sl : locationsPingIPs_) {
         if (!sl.isEmpty()) {
             ipList.add(sl);
@@ -133,6 +137,31 @@ QSet<QString> FirewallExceptions::getIPAddressesForFirewall() const
     }
 
     return ipList.get();
+}
+
+QSet<QString> FirewallExceptions::getIPAddressesForNotConnectedState(bool isAlwaysOnPlus) const
+{
+    if (isAlwaysOnPlus) {
+        return getIPAddressesForFirewallForConnectedState();
+    }
+    if (!isProxySet()) {
+        return getIPAddressesForFirewall();
+    }
+
+    UniqueIpList ipList;
+    ipList.add("127.0.0.1");
+    ipList.add(proxyIP_);
+    if (!remoteIP_.isEmpty()) {
+        ipList.add(remoteIP_);
+    }
+    addDnsServers(ipList);
+    return ipList.get();
+}
+
+void FirewallExceptions::clearConnectionExceptions()
+{
+    connectingIp_.clear();
+    dnsIps_.clear();
 }
 
 QSet<QString> FirewallExceptions::getIPAddressesForFirewallForConnectedState() const

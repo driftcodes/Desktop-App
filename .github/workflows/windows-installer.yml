@@ -253,7 +253,7 @@ jobs:
         run: |
           python tools/build_all.py --build-app --build-tests
           if ($LASTEXITCODE -ne 0) { throw "test build failed" }
-          ctest --test-dir build --output-on-failure -R "^(connectionmanager|connectionattemptstrategy|emergencyconnectionattemptstrategy|openvpnconnection|wireguardconnection|ikev2connection|customconfiglocationinfo|parseovpnconfigline|ovpncredentialinliner|wireguardcustomconfig|ovpndirectivewhitelist)$"
+          ctest --test-dir build --output-on-failure -R "^(connectionmanager|connectionattemptstrategy|emergencyconnectionattemptstrategy|openvpnconnection|wireguardconnection|ikev2connection|customconfiglocationinfo|parseovpnconfigline|ovpncredentialinliner|wireguardcustomconfig|ovpndirectivewhitelist|firewallpolicy)$"
           if ($LASTEXITCODE -ne 0) { throw "unit tests failed" }
 
       - name: Remove signing certificate

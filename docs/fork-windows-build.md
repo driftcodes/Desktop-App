@@ -46,7 +46,22 @@ Emergency Connect is unchanged and never uses the proxy.
   avoid this lookup. With the proxy on, UDP remotes are never looked up, and a profile with no TCP
   remote is refused without any lookup.
 - While connecting and connected, the server's IP is on the firewall's allowed list (as in the official
-  app). That permits traffic to it but does not send any.
+  app). That permits traffic to it but does not send any. Only OpenVPN and Windows system services may
+  use it, and it is removed when the connection ends, including after a `CONNECTED,ROUTE_ERROR`.
+- While not connected (disconnected, connecting, or reconnecting after Wi-Fi or Throne drops), the
+  firewall still allows your DNS servers (and ControlD's) for every program. The app needs them:
+  Windscribe's network library looks up every API hostname itself before sending the request, even
+  through a proxy, so blocking DNS would break login and server lists while the firewall is on. With a
+  proxy set, the other upstream exceptions are dropped in that state: Windscribe's API server
+  addresses (requests go through the proxy) and the server ping targets. Windscribe's DNS leak filter
+  is also off between the old OpenVPN process exiting and the new one starting, so other programs'
+  DNS queries can reach those DNS servers directly during a reconnect.
+
+### Reconnecting
+
+When the tunnel drops and the app reconnects, Windscribe's own API requests go through the proxy again
+(the official app leaves them going directly until the next full disconnect), and the firewall switches
+to the not-connected list described above.
 
 ### Firewall behaviour
 

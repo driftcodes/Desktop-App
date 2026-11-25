@@ -3,6 +3,8 @@ target_sources(engine PRIVATE
     firewallcontroller.h
     firewallexceptions.cpp
     firewallexceptions.h
+    firewallpolicy.cpp
+    firewallpolicy.h
     uniqueiplist.cpp
     uniqueiplist.h
 )
@@ -23,3 +25,7 @@ elseif(UNIX)
         firewallcontroller_linux.h
     )
 endif()
+
+if(IS_BUILD_TESTS)
+    add_subdirectory(tests)
+endif(IS_BUILD_TESTS)

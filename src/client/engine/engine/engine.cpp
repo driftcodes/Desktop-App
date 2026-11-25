@@ -23,6 +23,7 @@
 #include "crossplatformobjectfactory.h"
 #include "dns/dnsconfigurator.h"
 #include "firewall/firewallexceptions.h"
+#include "firewall/firewallpolicy.h"
 #include "getdeviceid.h"
 #include "locationsmodel/customconfiglocationinfo.h"
 #include "proxy/proxyservercontroller.h"
@@ -972,10 +973,7 @@ void Engine::cleanupImpl(bool isUpdating)
             // that it should keep the firewall on.  If we don't do this, the firewall blips out briefly when the new helper starts,
             // until the app re-enables the firewall.
             qCInfo(LOG_BASIC) << "Turning on firewall on boot for update";
-            firewallController_->setFirewallOnBoot(true, engineSettings_.firewallSettings().mode == FIREWALL_MODE_ALWAYS_ON_PLUS ?
-                                                             firewallExceptions_.getIPAddressesForFirewallForConnectedState() :
-                                                             firewallExceptions_.getIPAddressesForFirewall(),
-                                                   engineSettings_.isAllowLanTraffic());
+            firewallController_->setFirewallOnBoot(true, firewallIpsWhileNotConnected(), engineSettings_.isAllowLanTraffic());
         }
     }
 
@@ -1103,7 +1101,7 @@ void Engine::connectClickImpl(const LocationID &locationId, const types::Connect
             qCInfo(LOG_BASIC) << "Automatic enable firewall before connection";
             firewallController_->firewallOn(
                 firewallExceptions_.connectingIp(),
-                firewallExceptions_.getIPAddressesForFirewall(),
+                firewallIpsWhileNotConnected(),
                 engineSettings_.isAllowLanTraffic(),
                 locationId_.isCustomConfigsLocation(),
                 false);
@@ -1512,15 +1510,15 @@ void Engine::onConnectionManagerConnected()
 #endif
 
     bool isFirewallAlreadyEnabled = false;
-    if (engineSettings_.firewallSettings().mode == FIREWALL_MODE_AUTOMATIC) {
-        const bool isAllowFirewallAfterConnection =
+    {
+        // customConfigAllowFirewall_ is always true for OpenVPN custom configs; the connection's runtime
+        // answer (config + accepted push) decides. API locations always count as a full tunnel.
+        const bool tunnelCarriesAllTraffic =
             customConfigAllowFirewall_ && connectionManager_->isAllowFirewallAfterConnectionRuntime();
-
-        if (isAllowFirewallAfterConnection &&
-            engineSettings_.firewallSettings().when == FIREWALL_WHEN_AFTER_CONNECTION)
-        {
-            if (!firewallController_->firewallActualState())
-            {
+        switch (firewall_policy::afterConnected(engineSettings_.firewallSettings().mode,
+                                                engineSettings_.firewallSettings().when,
+                                                firewallController_->firewallActualState(), tunnelCarriesAllTraffic)) {
+            case firewall_policy::AutomaticAction::TurnOn:
                 qCDebug(LOG_BASIC) << "Automatic enable firewall after connection";
                 firewallController_->firewallOn(
                     connectionManager_->getLastConnectedIp(),
@@ -1530,17 +1528,14 @@ void Engine::onConnectionManagerConnected()
                     true);
                 emit firewallStateChanged(true);
                 isFirewallAlreadyEnabled = true;
-            }
-        }
-        else if (!isAllowFirewallAfterConnection &&
-            engineSettings_.firewallSettings().when == FIREWALL_WHEN_BEFORE_CONNECTION)
-        {
-            if (firewallController_->firewallActualState())
-            {
+                break;
+            case firewall_policy::AutomaticAction::TurnOff:
                 qCDebug(LOG_BASIC) << "Automatic disable firewall after connection";
                 firewallController_->firewallOff();
                 emit firewallStateChanged(false);
-            }
+                break;
+            case firewall_policy::AutomaticAction::None:
+                break;
         }
     }
 
@@ -1745,9 +1740,13 @@ void Engine::onConnectionManagerReconnecting()
     SplitTunnelExtensionManager::instance().stopExtension();
 #endif
 
+    // The tunnel is down: API requests go through the user's proxy again, as when disconnected, instead
+    // of directly over the physical network.
+    restoreWsnetProxySettings();
     DnsServersConfiguration::instance().setDisconnectedState();
     WSNet::instance()->dnsResolver()->setDnsServers(DnsServersConfiguration::instance().getCurrentDnsServers());
     connectStateController_->setConnectingState(LocationID());
+    // Re-applied for the not-connected state; with a proxy set that is the narrow list.
     updateFirewallSettings();
     WSNet::instance()->decoyTraffic()->stop();
 }
@@ -1800,6 +1799,14 @@ void Engine::onConnectionManagerError(ConnectError err, const CurrentConnectionD
         isNeedReconnectAfterRequestAuth_ = true;
         emit requestPrivKeyPassword();
         return;
+    }
+    else if (err == ConnectError::kRouteSetupFailure)
+    {
+        // OpenVPN reached CONNECTED before its routes failed, so this ends a dialed connection like a
+        // disconnect: restore the proxy and DNS, forget the server's firewall exception, and keep the
+        // firewall in whatever state it was (on stays on). Other errors keep their existing handling.
+        qCWarning(LOG_BASIC) << "Route setup failed after connecting; restoring the disconnected state";
+        doDisconnectRestoreStuff();
     }
     /*else if (err == IKEV_FAILED_REINSTALL_WAN_WIN)
     {
@@ -2842,6 +2849,17 @@ void Engine::updateWsnetConnectivityState()
     WSNet::instance()->setConnectivityState(effectiveOnline);
 }
 
+void Engine::restoreWsnetProxySettings()
+{
+    const auto &proxySettings = ProxyServerController::instance().getCurrentProxySettings();
+    WSNet::instance()->httpNetworkManager()->setProxySettings(proxySettings.curlAddress().toStdString(), proxySettings.getUsername().toStdString(), proxySettings.getPassword().toStdString());
+}
+
+QSet<QString> Engine::firewallIpsWhileNotConnected() const
+{
+    return firewallExceptions_.getIPAddressesForNotConnectedState(engineSettings_.firewallSettings().mode == FIREWALL_MODE_ALWAYS_ON_PLUS);
+}
+
 void Engine::updateFirewallSettings(bool forceTurnOn)
 {
     if (forceTurnOn || firewallController_->firewallActualState()) {
@@ -2849,8 +2867,7 @@ void Engine::updateFirewallSettings(bool forceTurnOn)
             firewallController_->firewallOn(
                 firewallExceptions_.connectingIp(),
                 // For Firewall Always On+ mode, only the IP-address we connect to is whitelisted in the firewall
-                engineSettings_.firewallSettings().mode == FIREWALL_MODE_ALWAYS_ON_PLUS ? firewallExceptions_.getIPAddressesForFirewallForConnectedState()
-                                                                                        : firewallExceptions_.getIPAddressesForFirewall(),
+                firewallIpsWhileNotConnected(),
                 engineSettings_.isAllowLanTraffic(),
                 locationId_.isCustomConfigsLocation(),
                 false);
@@ -2992,8 +3009,7 @@ void Engine::doDisconnectRestoreStuff()
     vpnShareController_->onDisconnectedFromVPNEvent();
 
     // enable proxy settings
-    const auto &proxySettings = ProxyServerController::instance().getCurrentProxySettings();
-    WSNet::instance()->httpNetworkManager()->setProxySettings(proxySettings.curlAddress().toStdString(), proxySettings.getUsername().toStdString(), proxySettings.getPassword().toStdString());
+    restoreWsnetProxySettings();
     DnsServersConfiguration::instance().setDisconnectedState();
     WSNet::instance()->dnsResolver()->setDnsServers(DnsServersConfiguration::instance().getCurrentDnsServers());
 
@@ -3006,19 +3022,9 @@ void Engine::doDisconnectRestoreStuff()
     DnsUtils::setVpnContext("", QStringList());
 #endif
 
-    bool bChanged;
-    firewallExceptions_.setConnectingIp("", bChanged);
-    firewallExceptions_.setDNSServers(QStringList(), bChanged);
-
-    if (firewallController_->firewallActualState()) {
-        firewallController_->firewallOn(
-            firewallExceptions_.connectingIp(),
-            engineSettings_.firewallSettings().mode == FIREWALL_MODE_ALWAYS_ON_PLUS ? firewallExceptions_.getIPAddressesForFirewallForConnectedState()
-                                                                                    : firewallExceptions_.getIPAddressesForFirewall(),
-            engineSettings_.isAllowLanTraffic(),
-            locationId_.isCustomConfigsLocation(),
-            false);
-    }
+    firewall_policy::leaveConnection(*firewallController_, firewallExceptions_,
+                                     [this]() { return firewallIpsWhileNotConnected(); },
+                                     engineSettings_.isAllowLanTraffic(), locationId_.isCustomConfigsLocation());
 
 #ifdef Q_OS_WIN
     helper_->setIPv6EnabledInFirewall(true);
@@ -3335,10 +3341,7 @@ void Engine::updateFirewallOnBoot()
 {
     if (engineSettings_.firewallSettings().isAlwaysOnMode()) {
         qCInfo(LOG_BASIC) << "Turning boot firewall on for always-on mode";
-        firewallController_->setFirewallOnBoot(true, engineSettings_.firewallSettings().mode == FIREWALL_MODE_ALWAYS_ON_PLUS ?
-                                                     firewallExceptions_.getIPAddressesForFirewallForConnectedState() :
-                                                     firewallExceptions_.getIPAddressesForFirewall(),
-                                                     engineSettings_.isAllowLanTraffic());
+        firewallController_->setFirewallOnBoot(true, firewallIpsWhileNotConnected(), engineSettings_.isAllowLanTraffic());
     } else {
         qCInfo(LOG_BASIC) << "Turning boot firewall off for non-always-on mode";
         firewallController_->setFirewallOnBoot(false);
