@@ -18,6 +18,8 @@ private slots:
     void testFirstConnectHeldUntilBlockConfirmed();
     void testStaleRetryDoesNotUndoUnproxiedSession();
     void testReconnectNeedsNotConnectedRules();
+    void testLocationSwitchFromUnproxiedKeepsNewRules();
+    void testNewUnproxiedSessionAfterErrorTakesOverFilter();
     void testRetryBacksOffAndStopsOnSuccess();
     void testDnsLeakFilterKeptAfterErrorUntilFirewallOff();
 };

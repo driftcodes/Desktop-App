@@ -365,17 +365,18 @@ bool Helper_win::deleteWhitelistPorts()
     return success;
 }
 
-DnsLeakFilterResult Helper_win::enableDnsLeaksProtection(bool permitWindscribeApps)
+DnsLeakFilterResult Helper_win::enableDnsLeaksProtection(bool permitWindscribeApps, DnsLeakFilterOwner owner)
 {
-    auto result = sendCommand(HelperCommand::enableDnsLeaksProtection, toStdVector(customDnsIp_), permitWindscribeApps);
+    auto result = sendCommand(HelperCommand::enableDnsLeaksProtection, toStdVector(customDnsIp_), permitWindscribeApps,
+                              static_cast<int>(owner));
     int answer = static_cast<int>(DnsLeakFilterResult::kFailed);
     deserializeAnswer(result, answer);
     return static_cast<DnsLeakFilterResult>(answer);
 }
 
-DnsLeakFilterResult Helper_win::disableDnsLeaksProtection()
+DnsLeakFilterResult Helper_win::disableDnsLeaksProtection(DnsLeakFilterOwner owner)
 {
-    auto result = sendCommand(HelperCommand::disableDnsLeaksProtection);
+    auto result = sendCommand(HelperCommand::disableDnsLeaksProtection, static_cast<int>(owner));
     int answer = static_cast<int>(DnsLeakFilterResult::kFailed);
     deserializeAnswer(result, answer);
     return static_cast<DnsLeakFilterResult>(answer);

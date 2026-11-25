@@ -24,8 +24,10 @@ public:
 
     void release();
 
-    // false when the rules could not be removed; they then stay whole.
-    bool disable();
+    // false when the rules could not be removed; they then stay whole. Requests are carried out for
+    // the filter's current owner only (DnsLeakFilterOwnership); others are ignored and return true /
+    // kApplied.
+    bool disable(DnsLeakFilterOwner requester);
     // Blocks port 53 to every adapter's DNS servers (minus the custom connected DNS). permitApps (a
     // proxied session that is not connected) blocks every local-network range as well, so a router
     // on a network joined meanwhile is covered too, applies no exclusions, and lets Windscribe's own
@@ -34,7 +36,7 @@ public:
     // user's choice. Calling it again rebuilds the rules in one transaction, so the block never lapses;
     // a failed rebuild keeps the rules in place. While enabled, a monitor rebuilds the rules when the
     // adapters' DNS servers change (also on the same network) and retries a rebuild that failed.
-    DnsLeakFilterResult enable(bool permitApps = false);
+    DnsLeakFilterResult enable(bool permitApps, DnsLeakFilterOwner requester);
 
     void setExcludeIps(const std::vector<std::wstring>& ips);
     void setWindscribeAppsIds(const AppsIds &appsIds);
@@ -42,6 +44,7 @@ public:
 
 private:
     std::recursive_mutex mutex_;
+    DnsLeakFilterOwnership ownership_;
     bool bCurrentState_;           // rules of this filter are in place
     bool bWanted_ = false;         // the client wants the filter on ...
     bool bWantedPermitApps_ = false;  // ... in this mode

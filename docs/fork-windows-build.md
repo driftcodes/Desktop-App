@@ -90,6 +90,11 @@ Emergency Connect is unchanged and never uses the proxy.
     a proxy has used the filter since. If it cannot get them, you get "Windscribe could not set up its
     DNS leak protection, so it did not connect" (also in the middle of a reconnect); it keeps trying in
     the background, so connecting again a moment later usually works.
+  - **One owner at a time.** The filter is shared with Windscribe's ordinary (no proxy) connections,
+    whose OpenVPN turns it on and off itself. While a proxied session holds it, the helper ignores
+    those requests, so switching location from a connection without a proxy to one with a proxy cannot
+    have the old connection remove the new one's filter as it shuts down. A new connection without a
+    proxy (also after a proxied one ended with an error) hands the filter back to its own OpenVPN.
   - Removing an app from the Exclusive exclusions takes away its DNS permit too; if that rebuild fails,
     the helper retries until the permit is gone.
 

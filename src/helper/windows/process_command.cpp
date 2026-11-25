@@ -745,13 +745,28 @@ std::string deleteWhitelistPorts(const std::string &pars)
     return serializeResult(res1.success && res2.success);
 }
 
+namespace {
+DnsLeakFilterOwner toDnsLeakFilterOwner(int value)
+{
+    switch (value) {
+    case static_cast<int>(DnsLeakFilterOwner::kProxiedSession):
+        return DnsLeakFilterOwner::kProxiedSession;
+    case static_cast<int>(DnsLeakFilterOwner::kAny):
+        return DnsLeakFilterOwner::kAny;
+    default:
+        return DnsLeakFilterOwner::kConnection;
+    }
+}
+} // namespace
+
 std::string enableDnsLeaksProtection(const std::string &pars)
 {
     WS_DEBUG_TRACE_SCOPE("enableDnsLeaksProtection");
 
     std::vector<std::wstring> customDnsIp;
     bool permitWindscribeApps = false;
-    deserializePars(pars, customDnsIp, permitWindscribeApps);
+    int owner = static_cast<int>(DnsLeakFilterOwner::kConnection);
+    deserializePars(pars, customDnsIp, permitWindscribeApps, owner);
 
     // Rather than reject the whole request on bad input, sanitize it: drop any invalid IP entries
     // and apply the valid remainder. These IPs are only excluded from the DNS firewall block, so
@@ -768,13 +783,15 @@ std::string enableDnsLeaksProtection(const std::string &pars)
 
     DnsFirewall::instance().setExcludeIps(customDnsIp);
     // kFailed: the previous rules stay; kIncomplete: blocks in, the helper retries the rest.
-    return serializeResult(static_cast<int>(DnsFirewall::instance().enable(permitWindscribeApps)));
+    return serializeResult(static_cast<int>(DnsFirewall::instance().enable(permitWindscribeApps, toDnsLeakFilterOwner(owner))));
 }
 
 std::string disableDnsLeaksProtection(const std::string &pars)
 {
     WS_DEBUG_TRACE_SCOPE("disableDnsLeaksProtection");
-    return serializeResult(static_cast<int>(DnsFirewall::instance().disable() ? DnsLeakFilterResult::kApplied
+    int owner = static_cast<int>(DnsLeakFilterOwner::kConnection);
+    deserializePars(pars, owner);
+    return serializeResult(static_cast<int>(DnsFirewall::instance().disable(toDnsLeakFilterOwner(owner)) ? DnsLeakFilterResult::kApplied
                                                                               : DnsLeakFilterResult::kFailed));
 }
 

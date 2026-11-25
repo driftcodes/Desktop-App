@@ -30,15 +30,23 @@ void leaveConnection(FirewallController &controller, FirewallExceptions &excepti
     }
 }
 
-DnsLeakFilterStep proxiedDnsLeakFilter(DnsLeakFilter current, CONNECT_STATE state, bool isProxySet, bool keepAfterSession)
+DnsLeakFilterStep proxiedDnsLeakFilter(DnsLeakFilter current, CONNECT_STATE state, bool isProxySet, bool keepAfterSession,
+                                       bool isNewSession)
 {
     switch (state) {
     case CONNECT_STATE_CONNECTING:
         // Entered once per connect or reconnect: the state controller does not repeat CONNECTING for
         // further attempts, so network changes are handled by proxiedDnsLeakFilterOnNetworkChange.
-        // A session that started proxied keeps the filter even if the proxy is turned off meanwhile.
-        if (current == DnsLeakFilter::kOff && !isProxySet) {
-            return {current, false};
+        if (!isProxySet) {
+            if (current == DnsLeakFilter::kOff) {
+                return {current, false};
+            }
+            if (isNewSession) {
+                // A new session without a proxy: its connector manages the filter. Release the one
+                // kept after the previous proxied session (the helper then follows the connector).
+                return {DnsLeakFilter::kOff, true};
+            }
+            // A proxied session reconnecting after the proxy was turned off keeps the filter.
         }
         return {DnsLeakFilter::kPermitWindscribeApps, true};
     case CONNECT_STATE_CONNECTED:
@@ -86,7 +94,9 @@ ProxiedDnsLeakFilter::ProxiedDnsLeakFilter(Send send, ScheduleRetry scheduleRetr
 
 void ProxiedDnsLeakFilter::onConnectState(CONNECT_STATE state, bool isProxySet, bool keepAfterSession)
 {
-    const DnsLeakFilterStep step = proxiedDnsLeakFilter(wanted_, state, isProxySet, keepAfterSession);
+    const bool isNewSession = state == CONNECT_STATE_CONNECTING && lastState_ == CONNECT_STATE_DISCONNECTED;
+    lastState_ = state;
+    const DnsLeakFilterStep step = proxiedDnsLeakFilter(wanted_, state, isProxySet, keepAfterSession, isNewSession);
     if (state == CONNECT_STATE_CONNECTING && step.next == DnsLeakFilter::kOff) {
         // A session without a proxy: its connector manages the filter itself. A pending retry (say, of
         // a failed disable after the previous proxied session) must not turn off what it enables, and

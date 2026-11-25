@@ -3260,9 +3260,13 @@ firewall_policy::DnsLeakFilterSendResult Engine::sendProxiedDnsLeakFilter(firewa
     if (!helper_ || isCleanupFinished_) {
         return DnsLeakFilterSendResult::kFailed;
     }
-    const DnsLeakFilterResult result = filter == DnsLeakFilter::kOff
-                                           ? helper_->disableDnsLeaksProtection()
-                                           : helper_->enableDnsLeaksProtection(filter == DnsLeakFilter::kPermitWindscribeApps);
+    // As the proxied session's owner: the helper then ignores a connector's requests (e.g. the previous
+    // session's OpenVPN ending after a location switch) until the engine releases the filter.
+    const DnsLeakFilterResult result =
+        filter == DnsLeakFilter::kOff
+            ? helper_->disableDnsLeaksProtection(DnsLeakFilterOwner::kProxiedSession)
+            : helper_->enableDnsLeaksProtection(filter == DnsLeakFilter::kPermitWindscribeApps,
+                                                DnsLeakFilterOwner::kProxiedSession);
     switch (result) {
     case DnsLeakFilterResult::kApplied:
         return DnsLeakFilterSendResult::kApplied;

@@ -44,8 +44,12 @@ struct DnsLeakFilterStep
     bool apply;  // send next to the helper
 };
 
+// isNewSession: CONNECTING straight from DISCONNECTED (a connect, not a reconnect or a location
+// switch of a running session). A new session without a proxy hands the filter back to its connector,
+// also one kept after a proxied session's error; a reconnect of a proxied session keeps it even if
+// the proxy was turned off meanwhile.
 DnsLeakFilterStep proxiedDnsLeakFilter(DnsLeakFilter current, CONNECT_STATE state, bool isProxySet,
-                                       bool keepAfterSession = false);
+                                       bool keepAfterSession = false, bool isNewSession = false);
 // Windows reported a network change: rebuild an active filter for the new adapters' DNS servers.
 DnsLeakFilterStep proxiedDnsLeakFilterOnNetworkChange(DnsLeakFilter current);
 // The firewall was turned off: a filter kept after a session ends with it.
@@ -99,6 +103,7 @@ private:
     ScheduleRetry scheduleRetry_;
     DnsLeakFilter wanted_ = DnsLeakFilter::kOff;
     DnsLeakFilter confirmed_ = DnsLeakFilter::kOff;
+    CONNECT_STATE lastState_ = CONNECT_STATE_DISCONNECTED;
     quint64 token_ = 0;
     int retryDelayMs_ = kFirstRetryMs;
 };

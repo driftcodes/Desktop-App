@@ -29,7 +29,7 @@ DnsFirewall::~DnsFirewall()
 
 void DnsFirewall::release()
 {
-    disable();
+    disable(DnsLeakFilterOwner::kAny);
     stopMonitor();
     WSACleanup();
 }
@@ -108,9 +108,14 @@ private:
 
 } // namespace
 
-bool DnsFirewall::disable()
+bool DnsFirewall::disable(DnsLeakFilterOwner requester)
 {
     std::lock_guard<std::recursive_mutex> guard(mutex_);
+    if (!ownership_.acceptDisable(requester)) {
+        spdlog::info("DnsFirewall::disable() from {} ignored: the filter belongs to {}", static_cast<int>(requester),
+                     static_cast<int>(ownership_.owner()));
+        return true;
+    }
     bWanted_ = false;
     HANDLE hEngine = fwmpWrapper_.getHandleAndLock();
 
@@ -147,9 +152,14 @@ bool DnsFirewall::disable()
     return isRemoved;
 }
 
-DnsLeakFilterResult DnsFirewall::enable(bool permitApps)
+DnsLeakFilterResult DnsFirewall::enable(bool permitApps, DnsLeakFilterOwner requester)
 {
     std::lock_guard<std::recursive_mutex> guard(mutex_);
+    if (!ownership_.acceptEnable(requester)) {
+        spdlog::info("DnsFirewall::enable() from {} ignored: the filter belongs to {}", static_cast<int>(requester),
+                     static_cast<int>(ownership_.owner()));
+        return DnsLeakFilterResult::kApplied;
+    }
     startMonitor();
     return enableImpl(permitApps);
 }

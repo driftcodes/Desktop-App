@@ -71,7 +71,8 @@ void ConnectionFactory::finishActiveConnections(Helper *helper)
     }
 
     helper->stopWireGuard();
-    helper->disableDnsLeaksProtection();
+    // Startup cleanup: whatever a previous run left, whoever owned it.
+    helper->disableDnsLeaksProtection(DnsLeakFilterOwner::kAny);
 #else
     helper->executeTaskKill(kTargetOpenVpn);
     helper->executeTaskKill(kTargetStunnel);

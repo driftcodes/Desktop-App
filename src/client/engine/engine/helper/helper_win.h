@@ -87,8 +87,11 @@ public:
     // adapters' DNS servers (a proxied session that is not connected). Re-enabling replaces the rules
     // atomically. kFailed when the helper could not apply the change (it then keeps the previous
     // rules) or did not answer; kIncomplete when the blocks are in but something else is missing.
-    DnsLeakFilterResult enableDnsLeaksProtection(bool permitWindscribeApps = false);
-    DnsLeakFilterResult disableDnsLeaksProtection();
+    // owner: connectors use the default; the engine's proxied session and cleanup say so. The helper
+    // ignores requests that are not the current owner's (see DnsLeakFilterOwnership).
+    DnsLeakFilterResult enableDnsLeaksProtection(bool permitWindscribeApps = false,
+                                                 DnsLeakFilterOwner owner = DnsLeakFilterOwner::kConnection);
+    DnsLeakFilterResult disableDnsLeaksProtection(DnsLeakFilterOwner owner = DnsLeakFilterOwner::kConnection);
 
     void reinstallWanIkev2();
     void enableWanIkev2();
