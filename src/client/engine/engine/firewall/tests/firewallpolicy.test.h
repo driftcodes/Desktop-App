@@ -30,6 +30,7 @@ private slots:
     void testConnectedReportedOnlyWithConnectedRules();
     void testLostHandOverReplyReclaimsFilter();
     void testSecondFailedHandOverBeforeReclaimKeepsRules();
+    void testDirectWireGuardOrIkev2AfterProxiedOpenVpn();
     void testIgnoredConnectorRequestIsNotInstalled();
     void testRetryBacksOffAndStopsOnSuccess();
     void testDnsLeakFilterKeptAfterErrorUntilFirewallOff();

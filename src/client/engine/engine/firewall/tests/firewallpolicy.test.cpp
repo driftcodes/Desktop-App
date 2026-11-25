@@ -1043,6 +1043,51 @@ void TestFirewallPolicy::testSecondFailedHandOverBeforeReclaimKeepsRules()
     QVERIFY(!helper.history.contains(DnsLeakFilter::kOff));
 }
 
+void TestFirewallPolicy::testDirectWireGuardOrIkev2AfterProxiedOpenVpn()
+{
+    // WireGuard (also AmneziaWG) and IKEv2 on Windows enable the filter before starting the tunnel
+    // and do not start it unless isDnsLeakFilterInstalled(), like OpenVPN without a proxy. The
+    // connector here stands for any of them.
+    using namespace firewall_policy;
+    const auto proxiedThenSwitch = [](FakeDnsLeakFilterHelper &helper, ProxiedDnsLeakFilter &filter) {
+        filter.onConnectRequest(true, false);
+        filter.onConnectState(CONNECT_STATE_CONNECTING, true, false);
+        filter.onConnectState(CONNECT_STATE_CONNECTED, true, false);
+        QCOMPARE(helper.inPlace, DnsLeakFilter::kBlockAll);
+        filter.onConnectState(CONNECT_STATE_CONNECTING, false, false);
+        filter.onConnectRequest(false, true);
+    };
+    // kFailed: the hand-over went through, but the connector's rules cannot be installed. It does
+    // not start; it releases what it took, as its teardown does.
+    {
+        FakeDnsLeakFilterHelper helper;
+        auto filter = helper.makeController();
+        proxiedThenSwitch(helper, filter);
+        filter.onConnectRequest(false, false);
+        QVERIFY(filter.mayStartAttempt(false));
+        const DnsLeakFilterResult result = helper.connectorStarts(true);
+        QCOMPARE(result, DnsLeakFilterResult::kFailed);
+        QVERIFY(!isDnsLeakFilterInstalled(result));
+        QVERIFY(helper.inPlace != DnsLeakFilter::kOff);  // nothing changed while it decided not to start
+        helper.connectorEnds();
+        QVERIFY(!helper.ownership.hasOwner());
+    }
+    // kIgnored: the connector got there while the engine still held the filter (the hand-over was not
+    // through). It does not start; its release is ignored too, so the engine's rules stay.
+    {
+        FakeDnsLeakFilterHelper helper;
+        auto filter = helper.makeController();
+        proxiedThenSwitch(helper, filter);
+        const DnsLeakFilter engineRules = helper.inPlace;
+        const DnsLeakFilterResult result = helper.connectorStarts();
+        QCOMPARE(result, DnsLeakFilterResult::kIgnored);
+        QVERIFY(!isDnsLeakFilterInstalled(result));
+        helper.connectorEnds();
+        QCOMPARE(helper.inPlace, engineRules);
+        QVERIFY(helper.ownership.hasOwner() && helper.ownership.owner() == DnsLeakFilterOwner::kProxiedSession);
+    }
+}
+
 void TestFirewallPolicy::testIgnoredConnectorRequestIsNotInstalled()
 {
     using namespace firewall_policy;

@@ -119,13 +119,27 @@ void WireGuardConnection::run()
 
     resetLogReader();
 
-    bool disableDNSLeakProtection = false;
+    // The DNS leak filter goes in before the tunnel starts, and the tunnel does not start without
+    // it: the rules left in place could be a proxied session's (which let Windscribe and excluded
+    // apps reach the adapters' DNS servers) or none. kIgnored (another owner holds the filter) does
+    // not count either.
+    if (!isDnsLeakFilterInstalled(helper_->enableDnsLeaksProtection())) {
+        qCCritical(LOG_CONNECTION) << "Could not install the DNS leak filter; not starting WireGuard";
+        helper_->disableDnsLeaksProtection();  // releases ours, if the helper took it; else ignored
+        stopWireGuard.dismiss();
+        helper_->stopWireGuard();
+        if (isAmneziaWG()) {
+            helper_->removeAppNetworkProfiles();
+        }
+        // Delay emiting signals until we have cleaned up all our resources.
+        emit error(ConnectError::kDnsLeakProtectionFailed);
+        emit disconnected();
+        return;
+    }
 
     bool serviceStarted = startService();
 
     while (serviceStarted) {
-        helper_->enableDnsLeaksProtection();
-        disableDNSLeakProtection = true;
 
         // If the wireguard service indicates that it has started, the adapter and tunnel are up.
         // Let's check if the client-server handshake, which indicates the tunnel is good-to-go, has happened yet.
@@ -182,9 +196,7 @@ void WireGuardConnection::run()
 
     wireguardLog_->getFinalLogEntries();
 
-    if (disableDNSLeakProtection) {
-        helper_->disableDnsLeaksProtection();
-    }
+    helper_->disableDnsLeaksProtection();
 
     if (isAmneziaWG()) {
         // This prevents the wintun adapter/network number from increasing on each connection.

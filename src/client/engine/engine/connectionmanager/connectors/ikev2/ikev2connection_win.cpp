@@ -320,8 +320,17 @@ IKEv2Connection_win::DialResult IKEv2Connection_win::startDial()
     }
 
     helper_->setIKEv2IPSecParameters();
-    helper_->enableDnsLeaksProtection();
+    const DnsLeakFilterResult dnsLeakFilterResult = helper_->enableDnsLeaksProtection();
     hostsAndDnsProtectionSet_ = true;
+    // No dial without the DNS leak filter: the rules left in place could be a proxied session's
+    // (which let Windscribe and excluded apps reach the adapters' DNS servers) or none. kIgnored
+    // (another owner holds the filter) does not count either.
+    if (!isDnsLeakFilterInstalled(dnsLeakFilterResult)) {
+        qCCritical(LOG_IKEV2) << "Could not install the DNS leak filter; not dialing";
+        cleanupHostsAndDnsProtection();
+        emit error(ConnectError::kDnsLeakProtectionFailed);
+        return DialResult::Error;
+    }
 
     if (stopRequested()) {
         cleanupHostsAndDnsProtection();

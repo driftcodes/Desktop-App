@@ -104,7 +104,7 @@ Emergency Connect is unchanged and never uses the proxy.
     that OpenVPN replaces them, so there is no moment without a filter in either direction, and the
     direct connection starts only once the helper has confirmed the hand-over. If it never does, the
     attempt stops with the DNS leak protection error and the previous rules stay (with the firewall on,
-    until you turn it off). A direct OpenVPN that cannot install its own rules does not start either.
+    until you turn it off). A direct connection (OpenVPN, WireGuard or IKEv2) that cannot install its own rules does not start either.
   - **The proxy setting is taken when you pick a location.** Everything that request leads to (the
     connection after the previous one has ended, a retry after fetching server credentials, the
     filter's hand-over) uses the proxy settings it was made with, and so do Windscribe's own requests
