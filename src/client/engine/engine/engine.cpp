@@ -4,6 +4,7 @@
 #include <QCryptographicHash>
 #include <QFileInfo>
 #include <QPointer>
+#include <QTimer>
 #include <spdlog/spdlog.h>
 #include <wsnet/WSNet.h>
 
@@ -2454,6 +2455,12 @@ void Engine::onNetworkOnlineStateChange(bool isOnline)
 
 void Engine::onNetworkChange(const types::NetworkInterface &networkInterface)
 {
+#ifdef Q_OS_WIN
+    // A different network can bring a different resolver; rebuild the proxied DNS leak filter for it
+    // (also while reconnecting, when the connect state stays CONNECTING, and while it is kept after an
+    // error). Local-network resolvers are blocked by range anyway while not connected.
+    applyProxiedDnsLeakFilter(firewall_policy::proxiedDnsLeakFilterOnNetworkChange(proxiedDnsLeakFilter_));
+#endif
     if (!networkInterface.networkOrSsid.isEmpty()) {
         api_responses::PortMap portMap(WSNet::instance()->apiResourcersManager()->portMap());
         if (!portMap.isValid()) {
@@ -3221,15 +3228,35 @@ void Engine::updateProxiedDnsLeakProtection(CONNECT_STATE state, DISCONNECT_REAS
 
 void Engine::applyProxiedDnsLeakFilter(const firewall_policy::DnsLeakFilterStep &step)
 {
-    using firewall_policy::DnsLeakFilter;
+    // proxiedDnsLeakFilter_ is the filter wanted for the current state; sendProxiedDnsLeakFilter()
+    // retries until the helper confirms it (the helper keeps the previous rules when it cannot apply).
     proxiedDnsLeakFilter_ = step.next;
-    if (!step.apply || !helper_) {
+    if (step.apply) {
+        sendProxiedDnsLeakFilter();
+    }
+}
+
+void Engine::sendProxiedDnsLeakFilter()
+{
+    using firewall_policy::DnsLeakFilter;
+    if (!helper_ || isCleanupFinished_) {
         return;
     }
-    if (step.next == DnsLeakFilter::kOff) {
-        helper_->disableDnsLeaksProtection();
-    } else {
-        helper_->enableDnsLeaksProtection(step.next == DnsLeakFilter::kPermitWindscribeApps);
+    const DnsLeakFilter wanted = proxiedDnsLeakFilter_;
+    const bool isApplied = wanted == DnsLeakFilter::kOff
+                               ? helper_->disableDnsLeaksProtection()
+                               : helper_->enableDnsLeaksProtection(wanted == DnsLeakFilter::kPermitWindscribeApps);
+    if (isApplied) {
+        return;
+    }
+    qCCritical(LOG_BASIC) << "DNS leak filter: the helper could not apply" << static_cast<int>(wanted)
+                          << "(previous rules kept); retrying in" << kDnsLeakFilterRetryMs << "ms";
+    if (!isDnsLeakFilterRetryScheduled_) {
+        isDnsLeakFilterRetryScheduled_ = true;
+        QTimer::singleShot(kDnsLeakFilterRetryMs, this, [this]() {
+            isDnsLeakFilterRetryScheduled_ = false;
+            sendProxiedDnsLeakFilter();
+        });
     }
 }
 

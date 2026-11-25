@@ -70,7 +70,7 @@ bool deleteSublayerAndAllFilters(HANDLE engineHandle, const GUID *subLayerGUID)
     return true;
 }
 
-bool deleteAllFiltersForSublayer(HANDLE engineHandle, const GUID *subLayerGUID, GUID layerKey)
+bool deleteAllFiltersForSublayer(HANDLE engineHandle, const GUID *subLayerGUID, GUID layerKey, bool *allDeleted)
 {
     FWPM_FILTER_ENUM_TEMPLATE0 enumTemplate;
     ZeroMemory(&enumTemplate, sizeof(enumTemplate));
@@ -80,6 +80,9 @@ bool deleteAllFiltersForSublayer(HANDLE engineHandle, const GUID *subLayerGUID, 
     DWORD dwRet = FwpmFilterCreateEnumHandle0(engineHandle, &enumTemplate, &enumHandle);
     if (dwRet != ERROR_SUCCESS) {
         spdlog::error("deleteAllFiltersForSublayer - FwpmFilterCreateEnumHandle0 failed: {}", dwRet);
+        if (allDeleted) {
+            *allDeleted = false;
+        }
         return false;
     }
 
@@ -92,6 +95,9 @@ bool deleteAllFiltersForSublayer(HANDLE engineHandle, const GUID *subLayerGUID, 
                 const DWORD deleteRet = FwpmFilterDeleteById0(engineHandle, filters[i]->filterId);
                 if (deleteRet != ERROR_SUCCESS) {
                     spdlog::error("deleteAllFiltersForSublayer - FwpmFilterDeleteById0 failed for filter {}: {}", filters[i]->filterId, deleteRet);
+                    if (allDeleted) {
+                        *allDeleted = false;
+                    }
                 }
             }
         }
@@ -101,6 +107,9 @@ bool deleteAllFiltersForSublayer(HANDLE engineHandle, const GUID *subLayerGUID, 
     }
     if (dwRet != ERROR_SUCCESS) {
         spdlog::error("deleteAllFiltersForSublayer - FwpmFilterEnum0 failed: {}", dwRet);
+        if (allDeleted) {
+            *allDeleted = false;
+        }
     }
     dwRet = FwpmFilterDestroyEnumHandle0(engineHandle, enumHandle);
     return true;

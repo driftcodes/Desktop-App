@@ -9,7 +9,8 @@
 namespace Utils
 {
     bool deleteSublayerAndAllFilters(HANDLE engineHandle, const GUID *subLayerGUID);
-    bool deleteAllFiltersForSublayer(HANDLE engineHandle, const GUID *subLayerGUID, GUID layerKey);
+    // allDeleted (optional): set to false if any filter could not be enumerated or deleted.
+    bool deleteAllFiltersForSublayer(HANDLE engineHandle, const GUID *subLayerGUID, GUID layerKey, bool *allDeleted = nullptr);
 
     std::string readAllFromPipe(HANDLE hPipe);
     std::wstring guidToStr(const GUID &guid);

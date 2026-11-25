@@ -767,15 +767,14 @@ std::string enableDnsLeaksProtection(const std::string &pars)
                       customDnsIp.end());
 
     DnsFirewall::instance().setExcludeIps(customDnsIp);
-    DnsFirewall::instance().enable(permitWindscribeApps);
-    return std::string();
+    // false: not (fully) applied; the previous rules stay and the client retries.
+    return serializeResult(DnsFirewall::instance().enable(permitWindscribeApps));
 }
 
 std::string disableDnsLeaksProtection(const std::string &pars)
 {
     WS_DEBUG_TRACE_SCOPE("disableDnsLeaksProtection");
-    DnsFirewall::instance().disable();
-    return std::string();
+    return serializeResult(DnsFirewall::instance().disable());
 }
 
 std::string reinstallWanIkev2(const std::string &pars)

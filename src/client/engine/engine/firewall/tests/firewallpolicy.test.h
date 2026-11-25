@@ -13,6 +13,7 @@ private slots:
     void testLeaveConnectionLeavesFirewallOff();
     void testAfterConnectedDecision();
     void testProxiedDnsLeakFilterSpansReconnect();
+    void testDnsLeakFilterRebuiltOnNetworkChangeWhileConnecting();
     void testDnsLeakFilterUntouchedWithoutProxy();
     void testDnsLeakFilterKeptAfterErrorUntilFirewallOff();
 };

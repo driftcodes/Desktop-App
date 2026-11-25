@@ -177,26 +177,26 @@ void TestFirewallPolicy::testAfterConnectedDecision()
 void TestFirewallPolicy::testProxiedDnsLeakFilterSpansReconnect()
 {
     using namespace firewall_policy;
-    // Connect, drop (Wi-Fi or Throne), reconnect, then the user's disconnect. The filter must never
-    // be off in between, also where the old OpenVPN process has exited and the next not started.
+    // Connect, drop (Wi-Fi), reconnect, location change, then the user's disconnect, as the state
+    // controller reports them: CONNECTING once per connect or reconnect, never twice in a row. The
+    // filter must never be off in between, also where the old OpenVPN process has exited and the next
+    // has not started.
     const CONNECT_STATE sequence[] = {CONNECT_STATE_CONNECTING, CONNECT_STATE_CONNECTED,
-                                      CONNECT_STATE_CONNECTING, CONNECT_STATE_CONNECTING,  // next attempt
-                                      CONNECT_STATE_CONNECTED,  CONNECT_STATE_DISCONNECTING,
-                                      CONNECT_STATE_CONNECTING, CONNECT_STATE_CONNECTED,   // location change
-                                      CONNECT_STATE_DISCONNECTING};
+                                      CONNECT_STATE_CONNECTING, CONNECT_STATE_CONNECTED,      // reconnect
+                                      CONNECT_STATE_DISCONNECTING, CONNECT_STATE_CONNECTING,  // location change
+                                      CONNECT_STATE_CONNECTED,  CONNECT_STATE_DISCONNECTING};
     const DnsLeakFilter expected[] = {DnsLeakFilter::kPermitWindscribeApps, DnsLeakFilter::kBlockAll,
-                                      DnsLeakFilter::kPermitWindscribeApps, DnsLeakFilter::kPermitWindscribeApps,
-                                      DnsLeakFilter::kBlockAll,             DnsLeakFilter::kPermitWindscribeApps,
                                       DnsLeakFilter::kPermitWindscribeApps, DnsLeakFilter::kBlockAll,
-                                      DnsLeakFilter::kPermitWindscribeApps};
+                                      DnsLeakFilter::kPermitWindscribeApps, DnsLeakFilter::kPermitWindscribeApps,
+                                      DnsLeakFilter::kBlockAll,             DnsLeakFilter::kPermitWindscribeApps};
     DnsLeakFilter filter = DnsLeakFilter::kOff;
     for (size_t i = 0; i < sizeof(sequence) / sizeof(sequence[0]); ++i) {
         // The proxy being turned off mid-session does not drop the filter either.
-        const auto step = proxiedDnsLeakFilter(filter, sequence[i], i < 4);
+        const auto step = proxiedDnsLeakFilter(filter, sequence[i], i < 3);
         filter = step.next;
         QCOMPARE(filter, expected[i]);
         if (sequence[i] == CONNECT_STATE_CONNECTING) {
-            QVERIFY(step.apply);  // re-applied per attempt, for the current network's DNS servers
+            QVERIFY(step.apply);
         }
     }
     const auto last = proxiedDnsLeakFilter(filter, CONNECT_STATE_DISCONNECTED, false);
@@ -207,6 +207,22 @@ void TestFirewallPolicy::testProxiedDnsLeakFilterSpansReconnect()
     refused = proxiedDnsLeakFilter(refused.next, CONNECT_STATE_DISCONNECTED, true);
     QCOMPARE(refused.next, DnsLeakFilter::kOff);
     QVERIFY(refused.apply);
+}
+
+void TestFirewallPolicy::testDnsLeakFilterRebuiltOnNetworkChangeWhileConnecting()
+{
+    using namespace firewall_policy;
+    // Wi-Fi drops while connected: CONNECTING. Wi-Fi returns with router B as its resolver while the
+    // state stays CONNECTING; only the network change can rebuild the filter for B.
+    auto step = proxiedDnsLeakFilter(DnsLeakFilter::kBlockAll, CONNECT_STATE_CONNECTING, true);
+    QCOMPARE(step.next, DnsLeakFilter::kPermitWindscribeApps);
+    step = proxiedDnsLeakFilterOnNetworkChange(step.next);
+    QCOMPARE(step.next, DnsLeakFilter::kPermitWindscribeApps);
+    QVERIFY(step.apply);
+    // Also while kept after an error, and while connected.
+    QVERIFY(proxiedDnsLeakFilterOnNetworkChange(DnsLeakFilter::kBlockAll).apply);
+    // Nothing to rebuild when the filter is not the engine's.
+    QVERIFY(!proxiedDnsLeakFilterOnNetworkChange(DnsLeakFilter::kOff).apply);
 }
 
 void TestFirewallPolicy::testDnsLeakFilterUntouchedWithoutProxy()

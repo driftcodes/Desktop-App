@@ -365,14 +365,20 @@ bool Helper_win::deleteWhitelistPorts()
     return success;
 }
 
-void Helper_win::enableDnsLeaksProtection(bool permitWindscribeApps)
+bool Helper_win::enableDnsLeaksProtection(bool permitWindscribeApps)
 {
-    sendCommand(HelperCommand::enableDnsLeaksProtection, toStdVector(customDnsIp_), permitWindscribeApps);
+    auto result = sendCommand(HelperCommand::enableDnsLeaksProtection, toStdVector(customDnsIp_), permitWindscribeApps);
+    bool isApplied = false;
+    deserializeAnswer(result, isApplied);
+    return isApplied;
 }
 
-void Helper_win::disableDnsLeaksProtection()
+bool Helper_win::disableDnsLeaksProtection()
 {
-    sendCommand(HelperCommand::disableDnsLeaksProtection);
+    auto result = sendCommand(HelperCommand::disableDnsLeaksProtection);
+    bool isApplied = false;
+    deserializeAnswer(result, isApplied);
+    return isApplied;
 }
 
 void Helper_win::reinstallWanIkev2()

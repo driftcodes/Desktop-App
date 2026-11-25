@@ -357,6 +357,9 @@ private:
     // processes, instead of following each OpenVPN process.
     void updateProxiedDnsLeakProtection(CONNECT_STATE state, DISCONNECT_REASON reason);
     void applyProxiedDnsLeakFilter(const firewall_policy::DnsLeakFilterStep &step);
+    void sendProxiedDnsLeakFilter();
+    static constexpr int kDnsLeakFilterRetryMs = 2000;
+    bool isDnsLeakFilterRetryScheduled_ = false;
     firewall_policy::DnsLeakFilter proxiedDnsLeakFilter_ = firewall_policy::DnsLeakFilter::kOff;
 #endif
 

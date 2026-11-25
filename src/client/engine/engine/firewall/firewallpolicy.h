@@ -31,7 +31,8 @@ void leaveConnection(FirewallController &controller, FirewallExceptions &excepti
 // Windows DNS leak filter (port 53 to the physical adapters' DNS servers) for a session started with a
 // proxy set. It is on from the first CONNECTING to the final DISCONNECTED, reconnects and the gaps
 // between OpenVPN processes included. While not connected Windscribe's programs and Exclusive-mode
-// excluded apps are permitted (kPermitWindscribeApps); while connected every program is blocked.
+// excluded apps are permitted (kPermitWindscribeApps) and every local-network range is blocked for the
+// rest; while connected every program is blocked from the adapters' resolvers.
 // A session that ends without the user's Disconnect (proxy unreachable, route error, sleep) while the
 // firewall stays on keeps it (keepAfterSession) until the firewall goes off or the next session.
 enum class DnsLeakFilter { kOff, kPermitWindscribeApps, kBlockAll };
@@ -39,11 +40,13 @@ enum class DnsLeakFilter { kOff, kPermitWindscribeApps, kBlockAll };
 struct DnsLeakFilterStep
 {
     DnsLeakFilter next;
-    bool apply;  // send next to the helper (CONNECTING always re-applies to pick up new DNS servers)
+    bool apply;  // send next to the helper
 };
 
 DnsLeakFilterStep proxiedDnsLeakFilter(DnsLeakFilter current, CONNECT_STATE state, bool isProxySet,
                                        bool keepAfterSession = false);
+// Windows reported a network change: rebuild an active filter for the new adapters' DNS servers.
+DnsLeakFilterStep proxiedDnsLeakFilterOnNetworkChange(DnsLeakFilter current);
 // The firewall was turned off: a filter kept after a session ends with it.
 DnsLeakFilterStep proxiedDnsLeakFilterAfterFirewallOff(DnsLeakFilter current, CONNECT_STATE state);
 

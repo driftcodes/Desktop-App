@@ -85,9 +85,10 @@ public:
 
     // permitWindscribeApps: also let Windscribe's programs and Exclusive-mode excluded apps reach the
     // adapters' DNS servers (a proxied session that is not connected). Re-enabling replaces the rules
-    // atomically.
-    void enableDnsLeaksProtection(bool permitWindscribeApps = false);
-    void disableDnsLeaksProtection();
+    // atomically. Both return false when the helper could not apply the change (it then keeps the
+    // previous rules) or did not answer.
+    bool enableDnsLeaksProtection(bool permitWindscribeApps = false);
+    bool disableDnsLeaksProtection();
 
     void reinstallWanIkev2();
     void enableWanIkev2();

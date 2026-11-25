@@ -34,6 +34,8 @@ DnsLeakFilterStep proxiedDnsLeakFilter(DnsLeakFilter current, CONNECT_STATE stat
 {
     switch (state) {
     case CONNECT_STATE_CONNECTING:
+        // Entered once per connect or reconnect: the state controller does not repeat CONNECTING for
+        // further attempts, so network changes are handled by proxiedDnsLeakFilterOnNetworkChange.
         // A session that started proxied keeps the filter even if the proxy is turned off meanwhile.
         if (current == DnsLeakFilter::kOff && !isProxySet) {
             return {current, false};
@@ -61,6 +63,11 @@ DnsLeakFilterStep proxiedDnsLeakFilter(DnsLeakFilter current, CONNECT_STATE stat
         return {DnsLeakFilter::kOff, true};
     }
     return {current, false};
+}
+
+DnsLeakFilterStep proxiedDnsLeakFilterOnNetworkChange(DnsLeakFilter current)
+{
+    return {current, current != DnsLeakFilter::kOff};
 }
 
 DnsLeakFilterStep proxiedDnsLeakFilterAfterFirewallOff(DnsLeakFilter current, CONNECT_STATE state)

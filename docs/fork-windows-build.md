@@ -64,20 +64,32 @@ Emergency Connect is unchanged and never uses the proxy.
   time between one OpenVPN process exiting and the next one starting. Before, it went off whenever an
   OpenVPN process ended. If the session ends some other way while the firewall stays on (for example
   Throne stopped, so the next attempt cannot reach the proxy, or a route error, or sleep), the filter
-  stays on too, until you turn the firewall off, log out, quit the app, or connect again. It covers a DNS server in a private
-  range, such as your router at 192.168.x.x, which the firewall's LAN permit would otherwise let every
-  program reach. While not connected, Windscribe's own programs and the apps excluded in Exclusive
-  split tunneling (Throne) may still use those DNS servers; while connected, no program may, as in the
-  official app. Other LAN traffic (printers, file shares, the router's web page) is not affected.
+  stays on too, until you turn the firewall off, log out, quit the app, or connect again.
+  - **While not connected** (connecting, reconnecting, or kept after an error) it blocks DNS to every
+    local-network address (10.x, 172.16-31.x, 192.168.x, 169.254.x and the IPv6 equivalents), not just
+    the router it knows about, so a router on a Wi-Fi network you join in the middle of a reconnect is
+    blocked before the app has even seen it. Public DNS servers on your adapters are blocked too, and
+    the filter is rebuilt whenever Windows reports a network change. Only Windscribe's own programs
+    and the apps excluded in Exclusive split tunneling (Throne) may still use DNS there. A custom
+    Connected DNS address is not exempt in this state either.
+  - **While connected** it blocks your adapters' DNS servers for every program, except a custom
+    Connected DNS you chose, as in the official app.
+  - Other LAN traffic (printers, file shares, the router's web page) is not affected.
+  - **If Windows cannot apply a change** (it cannot read the adapters, or a block cannot be added), the
+    helper keeps the rules that were in place, reports the failure, and the app logs it and tries
+    again every 2 seconds. A missing permit for Windscribe's own programs fails closed: the blocks go
+    in, Windscribe may be unable to look up hostnames, and the app retries.
+
   Limits:
   - A program that sends DNS to some other address or port (DNS-over-HTTPS to a public resolver, for
     example) is not covered by this filter; the firewall covers it while it is on.
   - After your own Disconnect the filter is off, as in the official app. In Always On mode the firewall
     stays on, and a DNS server in a private range is then reachable by every program through the LAN
     permit, while public DNS servers stay limited to Windscribe's programs.
-  - The filter covers the DNS servers your adapters had when the last attempt started. If you join a
-    different network while it is kept after an error, the new network's DNS server is not covered
-    until you connect again.
+  - A public DNS server handed out by a network joined during a reconnect is covered once Windows
+    reports the change and the filter is rebuilt (local-network ones are covered from the start).
+  - A program that needs DNS to a server on your LAN (for example a local Pi-hole you query directly)
+    cannot reach it while a proxied session is not connected.
   - Throne has to resolve its own server's name itself, or use an IP address: lookups it hands to the
     Windows DNS Client service are blocked while a proxied session is not connected.
   - macOS and Linux keep upstream's behaviour (DNS servers allowed for every program).
@@ -140,10 +152,12 @@ adapter** with Wireshark (filter: `udp.port == 53 || tcp.port == 53`). Find your
    `for /l %i in (1,1,60) do nslookup example.com 192.168.1.1 & timeout /t 1`). Neither may reach the
    Wi-Fi DNS server or 1.1.1.1 on the capture. Windscribe itself and Throne may still show DNS traffic
    there; that is expected.
-3. Stop Throne while connected. The app should end with "could not reach the proxy" and the firewall
+3. While it shows Connecting, join a different Wi-Fi network (or a phone hotspot) whose router has
+   another address, and query that router the same way: it must not appear on the capture either.
+4. Stop Throne while connected. The app should end with "could not reach the proxy" and the firewall
    should stay on; the lookups must still not appear on the capture. Start Throne and connect again.
-4. Disconnect and reconnect from the app, and check the same while it connects.
-5. Do this with the firewall in Automatic / Before Connection and in Always On.
+5. Disconnect and reconnect from the app, and check the same while it connects.
+6. Do this with the firewall in Automatic / Before Connection and in Always On.
 
 Your router's web page, printers and file shares should keep working throughout.
 

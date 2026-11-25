@@ -28,73 +28,154 @@ void DnsFirewall::release()
     WSACleanup();
 }
 
-void DnsFirewall::disable()
+namespace {
+
+// The DnsFirewall sublayer's rules in one WFP transaction (see scoped_permits::replaceDnsRules).
+class WfpDnsRuleStore : public scoped_permits::DnsRuleStore
+{
+public:
+    WfpDnsRuleStore(FwpmWrapper &wrapper, HANDLE engine, const GUID &subLayer, AppsIds &permittedApps)
+        : wrapper_(wrapper), engine_(engine), subLayer_(subLayer), permittedApps_(permittedApps) {}
+
+    bool begin() override { return wrapper_.beginTransaction(); }
+
+    bool removeAll() override
+    {
+        bool allDeleted = true;
+        const GUID layers[] = {FWPM_LAYER_ALE_AUTH_CONNECT_V4, FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4,
+                               FWPM_LAYER_ALE_AUTH_CONNECT_V6, FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6};
+        for (const GUID &layer : layers) {
+            Utils::deleteAllFiltersForSublayer(engine_, &subLayer_, layer, &allDeleted);
+        }
+        return allDeleted;
+    }
+
+    bool ensureSublayer() override
+    {
+        FWPM_SUBLAYER0 subLayer = { 0 };
+        subLayer.subLayerKey = subLayer_;
+        subLayer.displayData.name = (wchar_t *)FIREWALL_SUBLAYER_DNS_NAMEW;
+        subLayer.displayData.description = (wchar_t *)FIREWALL_SUBLAYER_DNS_NAMEW;
+        subLayer.flags = 0;
+        subLayer.weight = 0xFFFF;
+        const DWORD ret = FwpmSubLayerAdd0(engine_, &subLayer, NULL);
+        if (ret != ERROR_SUCCESS && ret != FWP_E_ALREADY_EXISTS) {
+            spdlog::error("DnsFirewall: FwpmSubLayerAdd0 failed: {}", ret);
+            return false;
+        }
+        return true;
+    }
+
+    bool add(const scoped_permits::DnsRule &rule) override
+    {
+        // Blocks at weight 6, above the main firewall's LAN permit (4); permits for the permitted
+        // programs at 7, which win within this sublayer. The main firewall still decides separately
+        // whether those programs may reach the address.
+        const std::vector<types::IpAddressRange> addr = { rule.target };
+        const FWP_ACTION_TYPE action = rule.isPermitForApps ? FWP_ACTION_PERMIT : FWP_ACTION_BLOCK;
+        const UINT8 weight = rule.isPermitForApps ? 7 : 6;
+        AppsIds *apps = rule.isPermitForApps ? &permittedApps_ : nullptr;
+        bool ret = false;
+        if (rule.target.isV4()) {
+            ret = Utils::addFilterV4(engine_, nullptr, action, weight, subLayer_, (wchar_t*)FIREWALL_SUBLAYER_DNS_NAMEW, nullptr, &addr, 0, 53, apps, false);
+        } else if (rule.target.isV6()) {
+            ret = Utils::addFilterV6(engine_, nullptr, action, weight, subLayer_, (wchar_t*)FIREWALL_SUBLAYER_DNS_NAMEW, nullptr, &addr, 0, 53, apps, false);
+        }
+        const char *kind = rule.isPermitForApps ? "permit (permitted programs)" : "block";
+        if (!ret) {
+            spdlog::error("Could not add DNS {} filter for {}", kind, rule.target.toString());
+        } else {
+            spdlog::debug("Added DNS {} filter for {}", kind, rule.target.toString());
+        }
+        return ret;
+    }
+
+    bool commit() override { return wrapper_.endTransaction(); }
+    void abort() override { wrapper_.abortTransaction(); }
+
+private:
+    FwpmWrapper &wrapper_;
+    HANDLE engine_;
+    GUID subLayer_;
+    AppsIds &permittedApps_;
+};
+
+} // namespace
+
+bool DnsFirewall::disable()
 {
     std::lock_guard<std::recursive_mutex> guard(mutex_);
     HANDLE hEngine = fwmpWrapper_.getHandleAndLock();
 
-    fwmpWrapper_.beginTransaction();
-    bCurrentState_ = false;
-    bPermitApps_ = false;
+    bool isRemoved = false;
+    if (fwmpWrapper_.beginTransaction()) {
+        bool allDeleted = true;
+        const GUID layers[] = {FWPM_LAYER_ALE_AUTH_CONNECT_V4, FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4,
+                               FWPM_LAYER_ALE_AUTH_CONNECT_V6, FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6};
+        for (const GUID &layer : layers) {
+            Utils::deleteAllFiltersForSublayer(hEngine, &subLayerGUID_, layer, &allDeleted);
+        }
+        if (allDeleted) {
+            const DWORD ret = FwpmSubLayerDeleteByKey0(hEngine, &subLayerGUID_);
+            if (ret != ERROR_SUCCESS && ret != FWP_E_SUBLAYER_NOT_FOUND) {
+                spdlog::error("DnsFirewall::disable(), FwpmSubLayerDeleteByKey0 failed: {}", ret);
+            }
+            isRemoved = fwmpWrapper_.endTransaction();
+        } else {
+            // Keep it whole rather than half removed; the client retries.
+            fwmpWrapper_.abortTransaction();
+        }
+    }
+    fwmpWrapper_.unlock();
 
-    if (Utils::deleteSublayerAndAllFilters(hEngine, &subLayerGUID_)) {
+    if (isRemoved) {
+        bCurrentState_ = false;
+        bPermitApps_ = false;
         spdlog::debug("DnsFirewall::disable(), all filters deleted");
     } else {
-        spdlog::debug("DnsFirewall::disable(), deleteSublayerAndAllFilters returned false (sublayer may not exist)");
+        spdlog::error("DnsFirewall::disable() failed; the DNS leak filter stays as it was");
     }
-
-    fwmpWrapper_.endTransaction();
-    fwmpWrapper_.unlock();
+    return isRemoved;
 }
 
-void DnsFirewall::enable(bool permitApps)
+bool DnsFirewall::enable(bool permitApps)
 {
     std::lock_guard<std::recursive_mutex> guard(mutex_);
-    bPermitApps_ = permitApps;
-    enableImpl();
+    return enableImpl(permitApps);
 }
 
-void DnsFirewall::enableImpl()
+bool DnsFirewall::enableImpl(bool permitApps)
 {
     AppsIds permittedApps;
-    if (bPermitApps_) {
+    if (permitApps) {
         permittedApps.addFrom(windscribeAppsIds_);
         permittedApps.addFrom(excludedAppsIds_);
         if (permittedApps.count() == 0) {
             spdlog::error("DnsFirewall::enable(), no permitted programs known; blocking DNS for every program");
         }
     }
-    const auto dnsServers = getDnsServers();
+    std::set<types::IpAddress> dnsServers;
+    const bool serversKnown = getDnsServers(dnsServers);
+    const auto rules = scoped_permits::dnsFilterRules(dnsServers, excludeIps_, permitApps, permittedApps.count());
 
     HANDLE hEngine = fwmpWrapper_.getHandleAndLock();
-    fwmpWrapper_.beginTransaction();
-
-    // Old rules out and new rules in within one transaction: re-enabling (e.g. switching between the
-    // connected and the reconnecting rules) never leaves a moment without the block.
-    Utils::deleteSublayerAndAllFilters(hEngine, &subLayerGUID_);
-
-    FWPM_SUBLAYER0 subLayer = { 0 };
-
-    subLayer.subLayerKey = subLayerGUID_;
-    subLayer.displayData.name = (wchar_t *)FIREWALL_SUBLAYER_DNS_NAMEW;
-    subLayer.displayData.description = (wchar_t *)FIREWALL_SUBLAYER_DNS_NAMEW;
-    subLayer.flags = 0;
-    subLayer.weight = 0xFFFF;
-
-    DWORD dwFwAPiRetCode = FwpmSubLayerAdd0(hEngine, &subLayer, NULL);
-    if (dwFwAPiRetCode != ERROR_SUCCESS && dwFwAPiRetCode != FWP_E_ALREADY_EXISTS) {
-        spdlog::error("DnsFirewall::enable(), FwpmSubLayerAdd0 failed: {}", dwFwAPiRetCode);
-        // Keep whatever rules were there before.
-        fwmpWrapper_.abortTransaction();
-        fwmpWrapper_.unlock();
-        return;
-    }
-
-    addFilters(hEngine, dnsServers, permittedApps);
-
-    fwmpWrapper_.endTransaction();
+    WfpDnsRuleStore store(fwmpWrapper_, hEngine, subLayerGUID_, permittedApps);
+    // Old rules out and new rules in within one transaction, aborted (keeping the old rules) unless
+    // every block is in: re-enabling never leaves a moment without the block.
+    const auto result = scoped_permits::replaceDnsRules(store, serversKnown, rules);
     fwmpWrapper_.unlock();
+
+    if (result == scoped_permits::ReplaceResult::kKeptPrevious) {
+        spdlog::error("DnsFirewall::enable() failed (adapters readable: {}); the previous rules stay", serversKnown);
+        return false;
+    }
     bCurrentState_ = true;
+    bPermitApps_ = permitApps;
+    if (result == scoped_permits::ReplaceResult::kAppliedWithoutSomePermits) {
+        spdlog::error("DnsFirewall::enable(), blocks in place but a permit is missing");
+        return false;
+    }
+    return true;
 }
 
 void DnsFirewall::setExcludeIps(const std::vector<std::wstring>& ips)
@@ -117,7 +198,7 @@ void DnsFirewall::setWindscribeAppsIds(const AppsIds &appsIds)
     }
     windscribeAppsIds_ = appsIds;
     if (bCurrentState_ && bPermitApps_) {
-        enableImpl();
+        enableImpl(true);
     }
 }
 
@@ -129,50 +210,14 @@ void DnsFirewall::setExcludedAppsIds(const AppsIds &appsIds)
     }
     excludedAppsIds_ = appsIds;
     if (bCurrentState_ && bPermitApps_) {
-        enableImpl();
+        enableImpl(true);
     }
 }
 
-void DnsFirewall::addFilters(HANDLE engineHandle, const std::set<types::IpAddress> &dnsServers, AppsIds &permittedApps)
-{
-    // For each DNS server: a block of port 53 (UDP and TCP) for every program, weight 6, above the
-    // main firewall's LAN permit (4), so a router in a private range is covered too; and, when
-    // programs are permitted, a permit for just them at weight 7, which wins within this sublayer.
-    // The main firewall still decides separately whether those programs may reach the address.
-    for (const auto &rule : scoped_permits::dnsFilterRules(dnsServers, excludeIps_, permittedApps.count())) {
-        const auto &ip = rule.server;
-        // Wrap the single host as a dual-stack range; addFilterV4/V6 dispatch by family
-        // (the wrong-family call is a no-op).
-        const uint8_t prefix = ip.isV4() ? 32 : 128;
-        const std::vector<types::IpAddressRange> addr = { types::IpAddressRange(ip, prefix) };
-        const FWP_ACTION_TYPE action = rule.isPermitForApps ? FWP_ACTION_PERMIT : FWP_ACTION_BLOCK;
-        const UINT8 weight = rule.isPermitForApps ? 7 : 6;
-        AppsIds *apps = rule.isPermitForApps ? &permittedApps : nullptr;
-        bool ret = false;
-        if (ip.isV4()) {
-            ret = Utils::addFilterV4(engineHandle, nullptr, action, weight, subLayerGUID_, (wchar_t*)FIREWALL_SUBLAYER_DNS_NAMEW, nullptr, &addr, 0, 53, apps, false);
-        } else if (ip.isV6()) {
-            ret = Utils::addFilterV6(engineHandle, nullptr, action, weight, subLayerGUID_, (wchar_t*)FIREWALL_SUBLAYER_DNS_NAMEW, nullptr, &addr, 0, 53, apps, false);
-        }
-
-        const char *kind = rule.isPermitForApps ? "permit (permitted programs)" : "block";
-        if (!ret) {
-            spdlog::error("Could not add DNS {} filter for {}", kind, ip.toString());
-        } else {
-            spdlog::debug("Added DNS {} filter for {}", kind, ip.toString());
-        }
-    }
-    for (const auto &ip : dnsServers) {
-        if (excludeIps_.count(ip) > 0) {
-            spdlog::debug("DnsFirewall::addFilters(), ip excluded: {}", ip.toString());
-        }
-    }
-}
-
-std::set<types::IpAddress> DnsFirewall::getDnsServers()
+bool DnsFirewall::getDnsServers(std::set<types::IpAddress> &dnsServers)
 {
     WS_DEBUG_TRACE_SCOPE("DnsFirewall::getDnsServers");
-    std::set<types::IpAddress> dnsServers;
+    dnsServers.clear();
 
     DWORD dwRetVal = 0;
     ULONG outBufLen = 0;
@@ -193,8 +238,12 @@ std::set<types::IpAddress> DnsFirewall::getDnsServers()
     } while ((dwRetVal == ERROR_BUFFER_OVERFLOW) && (iterations < MAX_TRIES));
 
     if (dwRetVal != NO_ERROR) {
+        // An error, unlike a network without DNS servers (ERROR_NO_DATA: no adapters at all).
+        if (dwRetVal == ERROR_NO_DATA) {
+            return true;
+        }
         spdlog::error("DnsFirewall::getDnsServers(), GetAdaptersAddresses failed: {}", dwRetVal);
-        return {};
+        return false;
     }
 
     PIP_ADAPTER_ADDRESSES pCurrAddresses = (PIP_ADAPTER_ADDRESSES)&arr[0];
@@ -227,5 +276,5 @@ std::set<types::IpAddress> DnsFirewall::getDnsServers()
         pCurrAddresses = pCurrAddresses->Next;
     }
 
-    return dnsServers;
+    return true;
 }
