@@ -7,6 +7,7 @@
 #include "ipv6_firewall.h"
 #include "utils.h"
 #include "adapters_info.h"
+#include "scoped_permit_plan.h"
 
 #define FIREWALL_SUBLAYER_IPV6_NAMEW WS_APP_IDENTIFIER_W L"IPV6FirewallSublayer"
 #define UUID_LAYER_IPV6 L"8b03e426-56a7-4669-a985-706406675e68"
@@ -21,69 +22,123 @@ void Ipv6Firewall::release()
     enableIPv6();
 }
 
-void Ipv6Firewall::enableIPv6()
+bool Ipv6Firewall::commitOrAbort(bool isComplete)
 {
-    std::lock_guard<std::recursive_mutex> guard(mutex_);
-
-    if (!isDisabled_)
-        return;
-
-    HANDLE hEngine = fwpmWrapper_.getHandleAndLock();
-    fwpmWrapper_.beginTransaction();
-
-    if (Utils::deleteSublayerAndAllFilters(hEngine, &subLayerGUID_)) {
-        spdlog::debug("Ipv6Firewall::enableIPv6(), all filters deleted");
-    } else {
-        spdlog::error("Ipv6Firewall::enableIPv6(), failed delete filters");
+    if (isComplete && fwpmWrapper_.endTransaction()) {
+        return true;
     }
-    whitelistFilterIds_.clear();
-
-    fwpmWrapper_.endTransaction();
-    fwpmWrapper_.unlock();
-    isDisabled_ = false;
+    // WFP would otherwise commit the operations that did succeed (e.g. some deletions only).
+    fwpmWrapper_.abortTransaction();
+    return false;
 }
 
-void Ipv6Firewall::disableIPv6(bool allowLanTraffic, bool isCustomConfig)
+bool Ipv6Firewall::enableIPv6()
 {
     std::lock_guard<std::recursive_mutex> guard(mutex_);
+    using Request = scoped_permits::Ipv6FirewallRequests::Request;
 
-    // Remember for rebuilds triggered by setSplitTunnelingInclusive().
+    if (!isDisabled_) {
+        requests_.onAttempt(Request::kUnblock, true);
+        return true;
+    }
+
+    HANDLE hEngine = fwpmWrapper_.getHandleAndLock();
+    bool isDone = fwpmWrapper_.beginTransaction();
+    if (isDone) {
+        const bool isRemoved = Utils::deleteSublayerAndAllFilters(hEngine, &subLayerGUID_);
+        if (!isRemoved) {
+            spdlog::error("Ipv6Firewall::enableIPv6(), the filters could not all be deleted; aborted, they stay");
+        }
+        isDone = commitOrAbort(isRemoved);
+    }
+    fwpmWrapper_.unlock();
+
+    // Recorded only once committed; otherwise the block stays whole and is retried.
+    if (isDone) {
+        whitelistFilterIds_.clear();
+        isDisabled_ = false;
+    }
+    requests_.onAttempt(Request::kUnblock, isDone);
+    return isDone;
+}
+
+bool Ipv6Firewall::disableIPv6(bool allowLanTraffic, bool isCustomConfig)
+{
+    std::lock_guard<std::recursive_mutex> guard(mutex_);
+    using Request = scoped_permits::Ipv6FirewallRequests::Request;
+
+    // Remember for rebuilds triggered by setSplitTunnelingInclusive() and for retries.
     allowLanTraffic_ = allowLanTraffic;
     isCustomConfig_ = isCustomConfig;
 
     HANDLE hEngine = fwpmWrapper_.getHandleAndLock();
-    fwpmWrapper_.beginTransaction();
+    if (!fwpmWrapper_.beginTransaction()) {
+        spdlog::error("Ipv6Firewall::disableIPv6(), could not begin a transaction; retrying");
+        fwpmWrapper_.unlock();
+        requests_.onAttempt(Request::kBlock, false);
+        return false;
+    }
+    const std::vector<UINT64> prevFilterIds = whitelistFilterIds_;
 
     // Rebuild the filters from scratch on every call, not just on the disabled->enabled edge:
     // a reconnect may land on a different tunnel adapter, and the Allow LAN setting may have
     // changed while connected. Bailing out when already disabled would keep stale tunnel
-    // permits / stale LAN rules.
-    if (!Utils::deleteSublayerAndAllFilters(hEngine, &subLayerGUID_)) {
-        spdlog::error("Ipv6Firewall::disableIPv6(), failed to delete existing filters");
+    // permits / stale LAN rules. One transaction: committed only with the old filters all gone and
+    // the new blocks in; otherwise the rules in place stay as they were.
+    bool isComplete = Utils::deleteSublayerAndAllFilters(hEngine, &subLayerGUID_);
+    if (!isComplete) {
+        spdlog::error("Ipv6Firewall::disableIPv6(), the existing filters could not all be deleted");
     }
     whitelistFilterIds_.clear();
 
-    FWPM_SUBLAYER0 subLayer = { 0 };
+    if (isComplete) {
+        FWPM_SUBLAYER0 subLayer = { 0 };
 
-    subLayer.subLayerKey = subLayerGUID_;
-    subLayer.displayData.name = (wchar_t *)FIREWALL_SUBLAYER_IPV6_NAMEW;
-    subLayer.displayData.description = (wchar_t *)FIREWALL_SUBLAYER_IPV6_NAMEW;
-    subLayer.flags = FWPM_SUBLAYER_FLAG_PERSISTENT;
-    subLayer.weight = 0xFFFF;
+        subLayer.subLayerKey = subLayerGUID_;
+        subLayer.displayData.name = (wchar_t *)FIREWALL_SUBLAYER_IPV6_NAMEW;
+        subLayer.displayData.description = (wchar_t *)FIREWALL_SUBLAYER_IPV6_NAMEW;
+        subLayer.flags = FWPM_SUBLAYER_FLAG_PERSISTENT;
+        subLayer.weight = 0xFFFF;
 
-    DWORD dwFwAPiRetCode = FwpmSubLayerAdd0(hEngine, &subLayer, NULL);
-    if (dwFwAPiRetCode != ERROR_SUCCESS && dwFwAPiRetCode != FWP_E_ALREADY_EXISTS) {
-        spdlog::error("Ipv6Firewall::disableIPv6(), FwpmSubLayerAdd0 failed: {}", dwFwAPiRetCode);
-        fwpmWrapper_.abortTransaction();
-        fwpmWrapper_.unlock();
-        return;
+        DWORD dwFwAPiRetCode = FwpmSubLayerAdd0(hEngine, &subLayer, NULL);
+        if (dwFwAPiRetCode != ERROR_SUCCESS && dwFwAPiRetCode != FWP_E_ALREADY_EXISTS) {
+            spdlog::error("Ipv6Firewall::disableIPv6(), FwpmSubLayerAdd0 failed: {}", dwFwAPiRetCode);
+            isComplete = false;
+        }
+    }
+    if (isComplete && !addFilters(hEngine, allowLanTraffic, isCustomConfig)) {
+        spdlog::error("Ipv6Firewall::disableIPv6(), a required block could not be added");
+        isComplete = false;
     }
 
-    addFilters(hEngine, allowLanTraffic, isCustomConfig);
-
-    fwpmWrapper_.endTransaction();
+    const bool isDone = commitOrAbort(isComplete);
     fwpmWrapper_.unlock();
-    isDisabled_ = true;
+    if (isDone) {
+        isDisabled_ = true;
+    } else {
+        spdlog::error("Ipv6Firewall::disableIPv6(), aborted; the IPv6 rules in place stay, retrying");
+        whitelistFilterIds_ = prevFilterIds;
+    }
+    requests_.onAttempt(Request::kBlock, isDone);
+    return isDone;
+}
+
+void Ipv6Firewall::retryPending()
+{
+    std::lock_guard<std::recursive_mutex> guard(mutex_);
+    using Request = scoped_permits::Ipv6FirewallRequests::Request;
+    switch (requests_.pending()) {
+    case Request::kBlock:
+        spdlog::info("Ipv6Firewall: retrying the IPv6 block");
+        disableIPv6(allowLanTraffic_, isCustomConfig_);
+        break;
+    case Request::kUnblock:
+        spdlog::info("Ipv6Firewall: retrying lifting the IPv6 block");
+        enableIPv6();
+        break;
+    default:
+        break;
+    }
 }
 
 void Ipv6Firewall::setSplitTunnelingState(SplitTunnelMode mode, const AppsIds &apps)
@@ -98,7 +153,8 @@ void Ipv6Firewall::setSplitTunnelingState(SplitTunnelMode mode, const AppsIds &a
     splitTunnelMode_ = mode;
     splitTunnelAppsIds_ = apps;
 
-    // If the filters are currently installed, rebuild them with the new state.
+    // If the filters are currently installed, rebuild them with the new state (requested here; a
+    // rebuild that fails keeps the old rules and is retried with it).
     if (isDisabled_) {
         disableIPv6(allowLanTraffic_, isCustomConfig_);
     }
@@ -111,33 +167,33 @@ void Ipv6Firewall::setSplitTunnelingWhitelistIps(const std::vector<types::IpAddr
     if (ips == whitelistIps_) {
         return;
     }
+    // The latest list asked for; the rules are built from it.
+    whitelistIps_ = ips;
 
     // Not installed yet — just hold the list; disableIPv6()/addFilters() will pick it up.
     if (!isDisabled_) {
-        whitelistIps_ = ips;
         return;
     }
 
     // Incremental update: replace only the destination filters, keeping the rest of the
-    // sublayer intact (this is called on every hostname resolution).
-    // Snapshot for rollback: committing with only the removals applied would drop the
-    // inclusive off-tunnel BLOCK and leak forced destinations' v6.
-    const std::vector<types::IpAddressRange> prevIps = std::move(whitelistIps_);
+    // sublayer intact (this is called on every hostname resolution). Committed only with the old
+    // ones all deleted and the new ones added: committing with only the removals applied would drop
+    // the inclusive off-tunnel BLOCK and leak forced destinations' v6.
     const std::vector<UINT64> prevFilterIds = whitelistFilterIds_;
-    whitelistIps_ = ips;
 
     HANDLE hEngine = fwpmWrapper_.getHandleAndLock();
-    fwpmWrapper_.beginTransaction();
-
-    removeWhitelistFiltersLocked(hEngine);
-    if (applyWhitelistFiltersLocked(hEngine)) {
-        fwpmWrapper_.endTransaction();
-    } else {
-        fwpmWrapper_.abortTransaction();
-        whitelistIps_ = prevIps;
-        whitelistFilterIds_ = prevFilterIds;
+    bool isDone = fwpmWrapper_.beginTransaction();
+    if (isDone) {
+        const bool isRemoved = removeWhitelistFiltersLocked(hEngine);
+        isDone = commitOrAbort(isRemoved && applyWhitelistFiltersLocked(hEngine));
     }
     fwpmWrapper_.unlock();
+    if (!isDone) {
+        // The old filters stay; a full rebuild from the latest list is retried.
+        spdlog::error("Ipv6Firewall::setSplitTunnelingWhitelistIps(), aborted; the filters in place stay, retrying");
+        whitelistFilterIds_ = prevFilterIds;
+        requests_.onAttempt(scoped_permits::Ipv6FirewallRequests::Request::kBlock, false);
+    }
 }
 
 bool Ipv6Firewall::applyWhitelistFiltersLocked(HANDLE engineHandle)
@@ -167,19 +223,27 @@ bool Ipv6Firewall::applyWhitelistFiltersLocked(HANDLE engineHandle)
     return ok;
 }
 
-void Ipv6Firewall::removeWhitelistFiltersLocked(HANDLE engineHandle)
+bool Ipv6Firewall::removeWhitelistFiltersLocked(HANDLE engineHandle)
 {
-    for (UINT64 id : whitelistFilterIds_) {
-        DWORD ret = FwpmFilterDeleteById0(engineHandle, id);
-        if (ret != ERROR_SUCCESS) {
-            spdlog::error("Ipv6Firewall::removeWhitelistFiltersLocked(), FwpmFilterDeleteById0 failed: {}", ret);
+    const bool isRemoved = scoped_permits::deleteRecordedFilters(whitelistFilterIds_, [&](UINT64 id) {
+        const DWORD ret = FwpmFilterDeleteById0(engineHandle, id);
+        if (ret == ERROR_SUCCESS) {
+            return scoped_permits::DeleteResult::kDeleted;
         }
-    }
-    whitelistFilterIds_.clear();
+        if (ret == FWP_E_FILTER_NOT_FOUND) {
+            return scoped_permits::DeleteResult::kNotFound;
+        }
+        spdlog::error("Ipv6Firewall::removeWhitelistFiltersLocked(), FwpmFilterDeleteById0 failed: {}", ret);
+        return scoped_permits::DeleteResult::kFailed;
+    });
+    whitelistFilterIds_.clear();  // the caller puts them back if it aborts
+    return isRemoved;
 }
 
-void Ipv6Firewall::addFilters(HANDLE engineHandle, bool allowLanTraffic, bool isCustomConfig)
+bool Ipv6Firewall::addFilters(HANDLE engineHandle, bool allowLanTraffic, bool isCustomConfig)
 {
+    // false if a block is missing (a missing permit only blocks more).
+    bool areBlocksAdded = true;
     AdaptersInfo ai;
     std::vector<NET_IFINDEX> taps = ai.getTAPAdapters();
 
@@ -187,6 +251,7 @@ void Ipv6Firewall::addFilters(HANDLE engineHandle, bool allowLanTraffic, bool is
     bool ret = Utils::addFilterV6(engineHandle, nullptr, FWP_ACTION_BLOCK, 0, subLayerGUID_, FIREWALL_SUBLAYER_IPV6_NAMEW);
     if (!ret) {
         spdlog::error("Ipv6Firewall::addFilters(), FwpmFilterAdd0 failed");
+        areBlocksAdded = false;
     }
 
     // add permit filter IPv6 for TAP-adapters, but only when the tunnel actually carries a routable
@@ -267,6 +332,7 @@ void Ipv6Firewall::addFilters(HANDLE engineHandle, bool allowLanTraffic, bool is
                                      nullptr, nullptr, 0, 0, &splitTunnelAppsIds_);
             if (!ret) {
                 spdlog::error("Could not add IPv6 inclusive ST apps block filter");
+                areBlocksAdded = false;
             }
 
             // Permit tunnel LUID at weight 4 so redirected apps' tunnel v6 beats the block above
@@ -300,6 +366,9 @@ void Ipv6Firewall::addFilters(HANDLE engineHandle, bool allowLanTraffic, bool is
         }
     }
 
-    // Per-destination filters for the split tunneling IP/hostname list.
-    applyWhitelistFiltersLocked(engineHandle);
+    // Per-destination filters for the split tunneling IP/hostname list (blocks in inclusive mode).
+    if (!applyWhitelistFiltersLocked(engineHandle) && splitTunnelMode_ == SplitTunnelMode::Inclusive) {
+        areBlocksAdded = false;
+    }
+    return areBlocksAdded;
 }

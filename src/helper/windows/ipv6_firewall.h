@@ -6,6 +6,7 @@
 #include "apps_ids.h"
 #include "fwpm_wrapper.h"
 #include "types/ipaddress.h"
+#include "scoped_permit_plan.h"
 
 class Ipv6Firewall
 {
@@ -20,8 +21,11 @@ public:
 
     void release();
 
-    void enableIPv6();
-    void disableIPv6(bool allowLanTraffic, bool isCustomConfig);
+    // Lift / install the IPv6 block. false if not committed: the rules in place stay as they were, and
+    // the request is retried by retryPending() (periodic) until a newer one replaces it.
+    bool enableIPv6();
+    bool disableIPv6(bool allowLanTraffic, bool isCustomConfig);
+    void retryPending();
 
     // Split tunneling carve-outs in the global v6 block.
     // Inclusive: apps = tunnel-bound apps (included apps + VPN executables); everything else
@@ -47,7 +51,12 @@ private:
     AppsIds splitTunnelAppsIds_;
     std::vector<types::IpAddressRange> whitelistIps_;
     std::vector<UINT64> whitelistFilterIds_;
-    void addFilters(HANDLE engineHandle, bool allowLanTraffic, bool isCustomConfig);
+    scoped_permits::Ipv6FirewallRequests requests_;
+    // false if a required block could not be added.
+    bool addFilters(HANDLE engineHandle, bool allowLanTraffic, bool isCustomConfig);
     bool applyWhitelistFiltersLocked(HANDLE engineHandle);
-    void removeWhitelistFiltersLocked(HANDLE engineHandle);
+    // false if a filter could not be deleted (and was not already gone).
+    bool removeWhitelistFiltersLocked(HANDLE engineHandle);
+    // Commits the open transaction if isComplete (and reports whether it committed); aborts otherwise.
+    bool commitOrAbort(bool isComplete);
 };

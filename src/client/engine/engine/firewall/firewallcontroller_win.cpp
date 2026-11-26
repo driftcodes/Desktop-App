@@ -86,5 +86,8 @@ void FirewallController_win::setVpnInterface_posix(const QString &vpnInterface)
 void FirewallController_win::setFirewallOnBoot(bool bEnable, const QSet<QString> &ipTable, bool isAllowLanTraffic)
 {
     // On Windows firewall on boot just retains existing firewall if enabled
-    helper_->setFirewallOnBoot(bEnable);
+    if (!helper_->setFirewallOnBoot(bEnable)) {
+        // The helper keeps retrying the write; until it succeeds a reboot follows the old setting.
+        qCCritical(LOG_FIREWALL_CONTROLLER) << "The Always On setting (" << bEnable << ") could not be saved yet; the helper retries";
+    }
 }

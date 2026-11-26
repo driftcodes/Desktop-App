@@ -315,6 +315,8 @@ std::optional<FirewallOnRequest> g_lanHeldRequest;
 // The startup decision while the firewall's state could not be read, and a removal of the main
 // firewall that failed; retried by retryPendingFirewallWork().
 scoped_permits::PendingFirewallWork g_pendingFirewallWork;
+// The client's Always On setting, until written to the registry.
+scoped_permits::BootSettingWrites g_bootSettingWrites;
 // Service start without a DNS baseline: the firewall kept from before must lose its LAN permit until
 // the client's next firewallOn/Off (which clear this).
 bool g_isStartupLanHoldPending = false;
@@ -369,29 +371,50 @@ void runFirewallAction(scoped_permits::PendingFirewallWork::Action action)
     }
 }
 
+// With g_firewallOnMutex held. Whether the client's Always On setting is written (nothing pending).
+bool writePendingBootSetting()
+{
+    const std::optional<bool> next = g_bootSettingWrites.next();
+    if (!next) {
+        return true;
+    }
+    const bool isWritten = FirewallOnBootManager::instance().setEnabled(*next);
+    if (!isWritten) {
+        spdlog::error("Could not save the Always On setting ({}); retrying", *next);
+    }
+    g_bootSettingWrites.onWritten(*next, isWritten);
+    return !g_bootSettingWrites.isPending();
+}
+
 } // namespace
 
-void applyFirewallStateAtStart(bool isFirewallOnBootEnabled)
+void applyFirewallStateAtStart()
 {
     std::lock_guard<std::recursive_mutex> guard(g_firewallOnMutex);
+    const scoped_permits::BootSetting setting = FirewallOnBootManager::instance().setting();
     const scoped_permits::FirewallStatus status = FirewallFilter::instance().firewallStatus();
-    if (!isFirewallOnBootEnabled) {
+    if (setting == scoped_permits::BootSetting::kUnreadable) {
+        // Not read as "disabled": that would turn the saved Always On firewall off, DNS block included.
+        spdlog::error("Service start: the Always On setting could not be read; the saved rules stay, retrying");
+    } else if (setting == scoped_permits::BootSetting::kDisabled) {
         spdlog::info("Firewall on boot is not enabled, turning off firewall");
     } else if (status == scoped_permits::FirewallStatus::kUnknown) {
         // Not read as "off": that would remove the DNS baseline while the saved firewall, LAN
         // permit included, may still be in force.
         spdlog::error("Service start: the firewall's state could not be read; the saved rules stay, retrying");
     }
-    runFirewallAction(g_pendingFirewallWork.atStart(isFirewallOnBootEnabled, status));
+    runFirewallAction(g_pendingFirewallWork.atStart(setting, status));
 }
 
 void retryPendingFirewallWork()
 {
     std::lock_guard<std::recursive_mutex> guard(g_firewallOnMutex);
+    writePendingBootSetting();
     if (!g_pendingFirewallWork.isPending()) {
         return;
     }
-    runFirewallAction(g_pendingFirewallWork.retry(FirewallFilter::instance().firewallStatus()));
+    runFirewallAction(g_pendingFirewallWork.retry(FirewallOnBootManager::instance().setting(),
+                                                  FirewallFilter::instance().firewallStatus()));
 }
 
 bool retryStartupLanHold()
@@ -764,12 +787,10 @@ std::string setIPv6EnabledInFirewall(const std::string &pars)
     bool bEnable, bAllowLanTraffic, bIsCustomConfig;
     deserializePars(pars, bEnable, bAllowLanTraffic, bIsCustomConfig);
     spdlog::info("setIPv6EnabledInFirewall: enable = {}, allowLanTraffic = {}, isCustomConfig = {}", bEnable, bAllowLanTraffic, bIsCustomConfig);
-    if (bEnable) {
-        Ipv6Firewall::instance().enableIPv6();
-    } else {
-        Ipv6Firewall::instance().disableIPv6(bAllowLanTraffic, bIsCustomConfig);
-    }
-    return std::string();
+    // false: not committed (the IPv6 rules in place stay as they were); retried periodically.
+    const bool isDone = bEnable ? Ipv6Firewall::instance().enableIPv6()
+                                : Ipv6Firewall::instance().disableIPv6(bAllowLanTraffic, bIsCustomConfig);
+    return serializeResult(isDone);
 }
 
 std::string setFirewallOnBoot(const std::string &pars)
@@ -780,8 +801,10 @@ std::string setFirewallOnBoot(const std::string &pars)
     deserializePars(pars, bEnable);
 
     spdlog::info("setFirewallOnBoot: {}", bEnable ? "enabled" : "disabled");
-    FirewallOnBootManager::instance().setEnabled(bEnable);
-    return std::string();
+    std::lock_guard<std::recursive_mutex> guard(g_firewallOnMutex);
+    g_bootSettingWrites.request(bEnable);
+    // false: not saved yet (a reboot now would follow the old setting); retried periodically.
+    return serializeResult(writePendingBootSetting());
 }
 
 std::string clearWifiHistoryData(const std::string &pars)

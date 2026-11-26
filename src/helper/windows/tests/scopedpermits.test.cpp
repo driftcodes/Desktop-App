@@ -940,11 +940,32 @@ struct FakeHelperFirewallState {
         }
         hasLeaked = hasLeaked || (isFirewallOn && !isBaselineIn);
     }
-    void start(bool isOnBootEnabled) { run(work.atStart(isOnBootEnabled, readStatus())); }
+    // The Always On setting in the registry, and reads of it that fail first.
+    bool isOnBootSaved = true;
+    int failNextSettingReads = 0;
+    scoped_permits::BootSetting readSetting()
+    {
+        if (failNextSettingReads > 0) {
+            --failNextSettingReads;
+            return scoped_permits::BootSetting::kUnreadable;
+        }
+        return isOnBootSaved ? scoped_permits::BootSetting::kEnabled : scoped_permits::BootSetting::kDisabled;
+    }
+    void start(bool isOnBootEnabled)
+    {
+        isOnBootSaved = isOnBootEnabled;
+        start();
+    }
+    void start()
+    {
+        const auto setting = readSetting();
+        run(work.atStart(setting, readStatus()));
+    }
     void retry()
     {
         if (work.isPending()) {
-            run(work.retry(readStatus()));
+            const auto setting = readSetting();
+            run(work.retry(setting, readStatus()));
         }
     }
     void clientOff() { run(work.requestTurnOff()); }
@@ -1024,7 +1045,146 @@ void testFailedFirewallOffKeepsDnsBaseline()
     VERIFY(!boot.hasLeaked);
 }
 
+void testBootSettingFromRegistry()
+{
+    using scoped_permits::BootSetting;
+    using scoped_permits::RegistryRead;
+    VERIFY(scoped_permits::bootSettingFromRegistry(RegistryRead::kOk, RegistryRead::kOk, 1) == BootSetting::kEnabled);
+    VERIFY(scoped_permits::bootSettingFromRegistry(RegistryRead::kOk, RegistryRead::kOk, 0) == BootSetting::kDisabled);
+    // A fresh install: no key, or the key without the value (disabling deletes it).
+    VERIFY(scoped_permits::bootSettingFromRegistry(RegistryRead::kNotFound, RegistryRead::kNotFound, 0) == BootSetting::kDisabled);
+    VERIFY(scoped_permits::bootSettingFromRegistry(RegistryRead::kOk, RegistryRead::kNotFound, 0) == BootSetting::kDisabled);
+    // Present but unreadable: neither.
+    VERIFY(scoped_permits::bootSettingFromRegistry(RegistryRead::kFailed, RegistryRead::kNotFound, 0) == BootSetting::kUnreadable);
+    VERIFY(scoped_permits::bootSettingFromRegistry(RegistryRead::kOk, RegistryRead::kFailed, 0) == BootSetting::kUnreadable);
+}
+
+void testUnreadableAlwaysOnSettingKeepsSavedRules()
+{
+    // Always On saved (enabled), the firewall with its LAN permit and the DNS block in place; the
+    // registry cannot be read at first.
+    FakeHelperFirewallState helper;
+    helper.failNextSettingReads = 2;
+    helper.start();
+    VERIFY(helper.isFirewallOn && helper.isBaselineIn && helper.offAttempts == 0);
+    VERIFY(helper.work.isPending());
+    helper.retry();
+    VERIFY(helper.isFirewallOn && helper.isBaselineIn && helper.offAttempts == 0);
+    helper.retry();  // read: enabled, so the saved firewall and its baseline are kept
+    VERIFY(helper.isAdopted && helper.isFirewallOn && helper.isBaselineIn);
+    VERIFY(!helper.work.isPending() && helper.offAttempts == 0 && !helper.hasLeaked);
+
+    // A fresh install (no setting at all): the firewall from before, if any, goes, then its DNS block.
+    FakeHelperFirewallState fresh;
+    fresh.isOnBootSaved = false;
+    fresh.start();
+    VERIFY(!fresh.isFirewallOn && !fresh.isBaselineIn && !fresh.work.isPending());
+    VERIFY(fresh.offAttempts == 1 && !fresh.hasLeaked);
+
+    // Unreadable, then read as disabled: only then is the firewall turned off.
+    FakeHelperFirewallState late;
+    late.isOnBootSaved = false;
+    late.failNextSettingReads = 1;
+    late.start();
+    VERIFY(late.isFirewallOn && late.isBaselineIn && late.offAttempts == 0);
+    late.retry();
+    VERIFY(!late.isFirewallOn && !late.isBaselineIn && !late.hasLeaked);
+}
+
+void testFailedBootSettingWriteIsRetried()
+{
+    // The user turns Always On on; the registry write fails.
+    scoped_permits::BootSettingWrites writes;
+    bool saved = false;  // the registry
+    int failNextWrites = 1;
+    const auto writeNow = [&]() {
+        const std::optional<bool> next = writes.next();
+        if (!next) {
+            return true;
+        }
+        bool isWritten = true;
+        if (failNextWrites > 0) {
+            --failNextWrites;
+            isWritten = false;
+        } else {
+            saved = *next;
+        }
+        writes.onWritten(*next, isWritten);
+        return !writes.isPending();
+    };
+
+    writes.request(true);
+    VERIFY(!writeNow());  // reported to the client: not saved
+    VERIFY(!saved && writes.isPending());
+    VERIFY(writeNow());  // the periodic retry
+    VERIFY(saved && !writes.isPending());
+    VERIFY(writeNow());  // nothing more to write
+
+    // A newer value replaces a pending one; only that one counts as written.
+    failNextWrites = 1;
+    writes.request(false);
+    VERIFY(!writeNow());
+    writes.request(true);
+    writes.onWritten(false, true);  // a late result for the older value
+    VERIFY(writes.isPending());
+    VERIFY(writeNow());
+    VERIFY(saved && !writes.isPending());
+}
+
+void testIpv6FirewallKeepsRulesUntilCommitted()
+{
+    // Ipv6Firewall's rebuild: the old filters out and the new in, in one transaction committed only
+    // if every deletion worked; its recorded state follows only a commit.
+    FakeWfp wfp;
+    wfp.begin();
+    const uint64_t oldBlock = wfp.add();
+    const uint64_t oldTunnelPermit = wfp.add();
+    wfp.commit();
+    bool isBlocked = true;  // Ipv6Firewall::isDisabled_
+    scoped_permits::Ipv6FirewallRequests requests;
+    using Request = scoped_permits::Ipv6FirewallRequests::Request;
+
+    uint64_t failingId = oldTunnelPermit;
+    const auto deleteById = [&](uint64_t id) {
+        if (id == failingId) {
+            return scoped_permits::DeleteResult::kFailed;
+        }
+        return wfp.remove(id) ? scoped_permits::DeleteResult::kDeleted : scoped_permits::DeleteResult::kNotFound;
+    };
+    const auto noSublayer = []() { return scoped_permits::DeleteResult::kDeleted; };
+    // Lifting the block (enableIPv6).
+    const auto unblock = [&]() {
+        wfp.begin();
+        const std::vector<uint64_t> listed(wfp.working.begin(), wfp.working.end());
+        const bool isCommitted = scoped_permits::removeSublayerAndFilters(true, listed, deleteById, noSublayer);
+        if (isCommitted) {
+            wfp.commit();
+            isBlocked = false;
+        } else {
+            wfp.abort();
+        }
+        requests.onAttempt(Request::kUnblock, isCommitted);
+        return isCommitted;
+    };
+
+    VERIFY(!unblock());
+    VERIFY(wfp.installed.count(oldBlock) == 1 && wfp.installed.count(oldTunnelPermit) == 1);
+    VERIFY(isBlocked);  // not recorded as lifted
+    VERIFY(requests.pending() == Request::kUnblock);
+
+    // The retry once the deletion works.
+    failingId = 0;
+    VERIFY(requests.pending() == Request::kUnblock && unblock());
+    VERIFY(wfp.installed.empty() && !isBlocked && requests.pending() == Request::kNone);
+
+    // A newer request replaces a pending one.
+    requests.onAttempt(Request::kBlock, false);
+    requests.onAttempt(Request::kUnblock, true);
+    VERIFY(requests.pending() == Request::kNone);
+}
+
 } // namespace
+
 
 
 
@@ -1056,6 +1216,10 @@ int main()
     testPartialSublayerRemovalIsAborted();
     testAlwaysOnStartWithUnreadableStatusKeepsDnsBlock();
     testFailedFirewallOffKeepsDnsBaseline();
+    testBootSettingFromRegistry();
+    testUnreadableAlwaysOnSettingKeepsSavedRules();
+    testFailedBootSettingWriteIsRetried();
+    testIpv6FirewallKeepsRulesUntilCommitted();
     if (g_failures == 0) {
         printf("All scoped permit tests passed.\n");
     }

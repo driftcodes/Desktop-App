@@ -1067,15 +1067,20 @@ void disableFirewall()
     if (isElevated()) {
         FwpmWrapper fwpmWrapper;
         if (fwpmWrapper.initialize()) {
-            Ipv6Firewall::instance(&fwpmWrapper).enableIPv6();
-            DnsFirewall::instance(&fwpmWrapper).disable(DnsLeakFilterOwner::kAny);
-            DnsFirewall::instance(&fwpmWrapper).setBaselineEnabled(false);
+            // The main firewall first: its DNS rules go only once it is gone, as in the service's
+            // firewallOff (with it still in force, LAN permit included, they keep DNS off the LAN).
             const bool isOff = FirewallFilter::instance(&fwpmWrapper).off();
-            SplitTunneling::removeAllFilters(fwpmWrapper);
+            const bool isIpv6Unblocked = Ipv6Firewall::instance(&fwpmWrapper).enableIPv6();
             if (isOff) {
+                DnsFirewall::instance(&fwpmWrapper).disable(DnsLeakFilterOwner::kAny);
+                DnsFirewall::instance(&fwpmWrapper).setBaselineEnabled(false);
+            }
+            SplitTunneling::removeAllFilters(fwpmWrapper);
+            if (isOff && isIpv6Unblocked) {
                 printf(WS_PRODUCT_NAME " firewall deleted.\n");
             } else {
-                printf("Some " WS_PRODUCT_NAME " firewall rules could not be deleted; please run this again.\n");
+                printf("Some " WS_PRODUCT_NAME " firewall rules could not be deleted (the DNS leak rules stay while the\n"
+                       "firewall does); please run this again.\n");
             }
         } else {
             printf("Failed to initialize access to the Windows firewall manager.\n");

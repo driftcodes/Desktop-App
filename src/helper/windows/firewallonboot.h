@@ -1,5 +1,7 @@
 #pragma once
 
+#include "scoped_permit_plan.h"
+
 class FirewallOnBootManager
 {
 public:
@@ -9,8 +11,10 @@ public:
         return fobm;
     }
 
+    // false if the setting could not be written (the registry keeps the old one).
     bool setEnabled(bool enabled);
-    bool isEnabled();
+    // Enabled, disabled (also: never set), or unreadable (the key or value exists but cannot be read).
+    scoped_permits::BootSetting setting();
 
 private:
     FirewallOnBootManager();

@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -608,11 +609,59 @@ private:
     bool isWaitingForFirewall_ = false;  // the firewall is off: nothing to retry until it is rebuilt
 };
 
+// The Always On ("firewall on boot") setting as read from the registry. A key or value that is
+// missing means never enabled (a fresh install, or turned off: disabling deletes the value); one that
+// exists but cannot be read is neither.
+enum class RegistryRead { kOk, kNotFound, kFailed };
+enum class BootSetting { kEnabled, kDisabled, kUnreadable };
+
+inline BootSetting bootSettingFromRegistry(RegistryRead key, RegistryRead value, uint32_t data)
+{
+    if (key == RegistryRead::kFailed) {
+        return BootSetting::kUnreadable;
+    }
+    if (key == RegistryRead::kNotFound) {
+        return BootSetting::kDisabled;
+    }
+    if (value == RegistryRead::kFailed) {
+        return BootSetting::kUnreadable;
+    }
+    if (value == RegistryRead::kNotFound) {
+        return BootSetting::kDisabled;
+    }
+    return data == 1 ? BootSetting::kEnabled : BootSetting::kDisabled;
+}
+
+// The client's setFirewallOnBoot: the latest value asked for stays pending until written, retried
+// periodically (a reboot meanwhile would otherwise follow the old value), and the client is told.
+class BootSettingWrites
+{
+public:
+    void request(bool isEnabled)
+    {
+        wanted_ = isEnabled;
+        isPending_ = true;
+    }
+    // The value to write now, if any.
+    std::optional<bool> next() const { return isPending_ ? std::optional<bool>(wanted_) : std::nullopt; }
+    void onWritten(bool isEnabled, bool isWritten)
+    {
+        if (isWritten && isEnabled == wanted_) {
+            isPending_ = false;
+        }
+    }
+    bool isPending() const { return isPending_; }
+
+private:
+    bool wanted_ = false;
+    bool isPending_ = false;
+};
+
 // The helper's main firewall work that waits for a retry (process_command.cpp). The DNS baseline
 // goes only once the main firewall is known to be off: with the firewall (and its LAN permit) still
 // in force, removing it would let any program reach a router's DNS.
-//  - Service start while the firewall's state cannot be read: nothing is touched (the saved firewall
-//    and DNS baseline stay) until a read succeeds.
+//  - Service start while the Always On setting or the firewall's state cannot be read: nothing is
+//    touched (the saved firewall and DNS baseline stay) until both can be.
 //  - A removal of the main firewall that failed (firewallOff, or service start with Always On
 //    disabled): the firewall and the baseline stay, and the removal is retried.
 // A firewallOn or firewallOff from the client decides afresh.
@@ -626,9 +675,15 @@ public:
         kRemoveBaseline   // the main firewall is off: the DNS baseline goes too
     };
 
-    Action atStart(bool isOnBootEnabled, FirewallStatus status)
+    // Service start (and its retries): the Always On setting and the firewall's state, each of which
+    // may be unreadable; then nothing is touched (the saved firewall and DNS baseline stay).
+    Action atStart(BootSetting setting, FirewallStatus status)
     {
-        if (!isOnBootEnabled) {
+        if (setting == BootSetting::kUnreadable) {
+            isDecisionPending_ = true;
+            return Action::kNone;
+        }
+        if (setting == BootSetting::kDisabled) {
             return requestTurnOff();
         }
         return decide(status);
@@ -655,14 +710,14 @@ public:
         isDecisionPending_ = false;
         isTurnOffPending_ = false;
     }
-    // The periodic retry, with the firewall's state read now.
-    Action retry(FirewallStatus status)
+    // The periodic retry, with the setting and the firewall's state read now.
+    Action retry(BootSetting setting, FirewallStatus status)
     {
         if (isTurnOffPending_) {
             return Action::kTurnOff;
         }
         if (isDecisionPending_) {
-            return decide(status);
+            return atStart(setting, status);
         }
         return Action::kNone;
     }
@@ -684,6 +739,20 @@ private:
 
     bool isDecisionPending_ = false;
     bool isTurnOffPending_ = false;
+};
+
+// Ipv6Firewall: its last request (block IPv6 outside the tunnel, or lift the block), retried while it
+// has not been committed. A failed attempt is aborted, so the rules in place stay as they were; a
+// newer request replaces it.
+class Ipv6FirewallRequests
+{
+public:
+    enum class Request { kNone, kBlock, kUnblock };
+    void onAttempt(Request request, bool isCommitted) { pending_ = isCommitted ? Request::kNone : request; }
+    Request pending() const { return pending_; }
+
+private:
+    Request pending_ = Request::kNone;
 };
 
 } // namespace scoped_permits

@@ -23,26 +23,28 @@ bool FirewallOnBootManager::setEnabled(bool enabled)
     return disable();
 }
 
-bool FirewallOnBootManager::isEnabled()
+scoped_permits::BootSetting FirewallOnBootManager::setting()
 {
+    using scoped_permits::RegistryRead;
+    const auto toRead = [](LONG code) { return code == ERROR_FILE_NOT_FOUND ? RegistryRead::kNotFound : RegistryRead::kFailed; };
+
     winreg::RegKey registry;
     winreg::RegResult result = registry.TryOpen(HKEY_LOCAL_MACHINE, kRegistryKey);
     if (!result) {
         if (result.Code() != ERROR_FILE_NOT_FOUND) {
-            spdlog::error(L"FirewallOnBootManager::isEnabled failed opening key {}: error {}", kRegistryKey, result.Code());
+            spdlog::error(L"FirewallOnBootManager::setting failed opening key {}: error {}", kRegistryKey, result.Code());
         }
-        return false;
+        return scoped_permits::bootSettingFromRegistry(toRead(result.Code()), RegistryRead::kNotFound, 0);
     }
 
     const auto value = registry.TryGetDwordValue(kRegistryValue);
     if (!value) {
         if (value.GetError().Code() != ERROR_FILE_NOT_FOUND) {
-            spdlog::error(L"FirewallOnBootManager::isEnabled failed checking value {}: error {}", kRegistryValue, value.GetError().Code());
+            spdlog::error(L"FirewallOnBootManager::setting failed reading value {}: error {}", kRegistryValue, value.GetError().Code());
         }
-        return false;
+        return scoped_permits::bootSettingFromRegistry(RegistryRead::kOk, toRead(value.GetError().Code()), 0);
     }
-
-    return (value.GetValue() == 1);
+    return scoped_permits::bootSettingFromRegistry(RegistryRead::kOk, RegistryRead::kOk, value.GetValue());
 }
 
 bool FirewallOnBootManager::enable()

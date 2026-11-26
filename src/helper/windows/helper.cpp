@@ -60,16 +60,18 @@ bool Helper::onInit()
     Ipv6Firewall::instance(&fwpmWrapper_);
     SplitTunneling::instance(&fwpmWrapper_);
     // Retried periodically: a split-tunnel permit update (an excluded app or IP added or removed)
-    // that failed, the startup decision below while the firewall's state cannot be read, and a
-    // removal of the firewall that failed.
+    // that failed, the startup decision below while the Always On setting or the firewall's state
+    // cannot be read, a removal of the firewall or a write of the Always On setting that failed, and
+    // an IPv6 firewall change that did not commit.
     DnsFirewall::instance().setPeriodicTask([]() {
         FirewallFilter::instance().retryPendingSplitTunnelUpdate();
         retryPendingFirewallWork();
+        Ipv6Firewall::instance().retryPending();
     });
 
     setStatus(SERVICE_START_PENDING);
 
-    applyFirewallStateAtStart(FirewallOnBootManager::instance().isEnabled());
+    applyFirewallStateAtStart();
 
     return true;
 }
