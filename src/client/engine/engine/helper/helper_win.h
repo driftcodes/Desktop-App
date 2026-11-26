@@ -69,7 +69,9 @@ public:
 
     // bAllowLanTraffic/bIsCustomConfig are only meaningful when disabling IPv6 (b == false):
     // they gate the LAN (fc00::/7, ff00::/8) permits in the helper's Ipv6Firewall sublayer.
-    void setIPv6EnabledInFirewall(bool b, bool bAllowLanTraffic = false, bool bIsCustomConfig = false);
+    // b false: block IPv6 outside the tunnel (true once its blocks are in); b true: lift the block.
+    // false: not applied yet (the helper keeps the rules in place as they were and retries).
+    bool setIPv6EnabledInFirewall(bool b, bool bAllowLanTraffic = false, bool bIsCustomConfig = false);
     // false if the helper could not save it (it retries; a reboot meanwhile follows the old setting).
     bool setFirewallOnBoot(bool b);
 

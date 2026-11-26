@@ -1260,4 +1260,22 @@ void TestFirewallPolicy::testConnectedReportNeedsConnectedRequest()
     QVERIFY(!ensureConnectedFirewallReady(failing, [&]() { applyConnected(failing); }));
 }
 
+void TestFirewallPolicy::testIpv6BlockGatesConnected()
+{
+    // The IPv6 block (an IPv4-only VPN, native IPv6 on the Wi-Fi, firewall off) must be in before
+    // connected is reported: the helper's failure is not just logged.
+    int retries = 0;
+    const auto retryWorks = [&]() { ++retries; return true; };
+    const auto retryFails = [&]() { ++retries; return false; };
+
+    QVERIFY(firewall_policy::ensureStepApplied(true, retryFails));
+    QCOMPARE(retries, 0);
+
+    QVERIFY(firewall_policy::ensureStepApplied(false, retryWorks));
+    QCOMPARE(retries, 1);
+
+    QVERIFY(!firewall_policy::ensureStepApplied(false, retryFails));
+    QCOMPARE(retries, 2);
+}
+
 QTEST_MAIN(TestFirewallPolicy)

@@ -136,7 +136,7 @@ QString connectStateString(types::ConnectState state, LocationID location, TUNNE
         case ConnectError::kRouteSetupFailure:
             return QString("Error: The VPN connected but its routes could not be added");
         case ConnectError::kDnsLeakProtectionFailed:
-            return QString("Error: DNS leak protection could not be set up, so the VPN did not connect. Try again in a moment");
+            return QString("Error: leak protection (DNS or IPv6 firewall rules) could not be set up, so the VPN did not connect. Try again in a moment");
         default:
             if (!state.connectErrorDetail.isEmpty()) {
                 return QString("Error: %1").arg(static_cast<int>(state.connectError)) + QString(". ") + state.connectErrorDetail;

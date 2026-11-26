@@ -1618,7 +1618,10 @@ void Engine::onConnectionManagerConnected()
     dnsConfigurator_->applyWhileConnected(connectionManager_->getVpnAdapterInfo(),
                                           connectionManager_->currentProtocol() == types::Protocol::WIREGUARD);
 #ifdef Q_OS_WIN
-    helper_->setIPv6EnabledInFirewall(false, engineSettings_.isAllowLanTraffic(), locationId_.isCustomConfigsLocation());
+    // Required before connected is reported (checked below): with an IPv4-only tunnel and the
+    // firewall off, nothing else keeps ordinary traffic off the physical adapter's IPv6.
+    const bool isIpv6Blocked = helper_->setIPv6EnabledInFirewall(false, engineSettings_.isAllowLanTraffic(),
+                                                                 locationId_.isCustomConfigsLocation());
 #endif
 
     // IPv6 summary for split tunneling leak analysis. Both adapters are already dumped in full
@@ -1731,6 +1734,15 @@ void Engine::onConnectionManagerConnected()
     if (firewallController_ &&
         !firewall_policy::ensureConnectedFirewallReady(*firewallController_, [this]() { applyConnectedFirewall(); })) {
         qCCritical(LOG_CONNECTION) << "The firewall could not be applied completely; disconnecting";
+        pendingDisconnectError_ = ConnectError::kDnsLeakProtectionFailed;
+        connectionManager_->clickDisconnect(DISCONNECTED_WITH_ERROR);
+        return;
+    }
+    if (!firewall_policy::ensureStepApplied(isIpv6Blocked, [this]() {
+            return helper_->setIPv6EnabledInFirewall(false, engineSettings_.isAllowLanTraffic(),
+                                                     locationId_.isCustomConfigsLocation());
+        })) {
+        qCCritical(LOG_CONNECTION) << "The IPv6 block could not be applied; disconnecting";
         pendingDisconnectError_ = ConnectError::kDnsLeakProtectionFailed;
         connectionManager_->clickDisconnect(DISCONNECTED_WITH_ERROR);
         return;

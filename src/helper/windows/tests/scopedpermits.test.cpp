@@ -1131,56 +1131,143 @@ void testFailedBootSettingWriteIsRetried()
     VERIFY(saved && !writes.isPending());
 }
 
-void testIpv6FirewallKeepsRulesUntilCommitted()
+// Ipv6Firewall's block and lift, with Windows reduced to what it holds (driven as Ipv6Firewall does:
+// a request, then the step its sync asks for; retryPending() repeats the step).
+struct FakeIpv6Firewall {
+    scoped_permits::Ipv6BlockSync sync;
+    bool isBlockInWindows = false;    // the persistent sublayer and its blocks
+    bool isExcludedPermitIn = false;  // e.g. Throne's IPv6 permit (exclusive mode)
+    int failNextCommits = 0;
+    int failNextPermits = 0;
+    int unblockAttempts = 0;
+
+    bool commit()
+    {
+        if (failNextCommits > 0) {
+            --failNextCommits;
+            return false;  // aborted: Windows keeps what it had
+        }
+        return true;
+    }
+    bool block()
+    {
+        if (!commit()) {
+            sync.onFailed();
+            return false;
+        }
+        isBlockInWindows = true;
+        isExcludedPermitIn = true;
+        if (failNextPermits > 0) {
+            --failNextPermits;
+            isExcludedPermitIn = false;
+        }
+        sync.onBlockCommitted(isExcludedPermitIn);
+        return true;
+    }
+    bool unblock()
+    {
+        ++unblockAttempts;
+        if (!commit()) {
+            sync.onFailed();
+            return false;
+        }
+        isBlockInWindows = false;
+        isExcludedPermitIn = false;
+        sync.onUnblockCommitted();
+        return true;
+    }
+    bool requestBlock() { sync.requestBlock(); return block(); }
+    bool requestUnblock()
+    {
+        sync.requestUnblock();
+        return sync.step() == scoped_permits::Ipv6BlockSync::Step::kNothing || unblock();
+    }
+    void settingsChanged()
+    {
+        sync.onSettingsChanged();
+        if (sync.step() == scoped_permits::Ipv6BlockSync::Step::kBlock) {
+            block();
+        }
+    }
+    void retry()
+    {
+        switch (sync.step()) {
+        case scoped_permits::Ipv6BlockSync::Step::kBlock: block(); break;
+        case scoped_permits::Ipv6BlockSync::Step::kUnblock: unblock(); break;
+        default: break;
+        }
+    }
+};
+
+void testIpv6UnblockChecksWindowsNotMemory()
 {
-    // Ipv6Firewall's rebuild: the old filters out and the new in, in one transaction committed only
-    // if every deletion worked; its recorded state follows only a commit.
-    FakeWfp wfp;
-    wfp.begin();
-    const uint64_t oldBlock = wfp.add();
-    const uint64_t oldTunnelPermit = wfp.add();
-    wfp.commit();
-    bool isBlocked = true;  // Ipv6Firewall::isDisabled_
-    scoped_permits::Ipv6FirewallRequests requests;
-    using Request = scoped_permits::Ipv6FirewallRequests::Request;
+    // The removal tool (a fresh process) with an IPv6 block left in Windows by an earlier one.
+    FakeIpv6Firewall tool;
+    tool.isBlockInWindows = true;
+    VERIFY(tool.requestUnblock());
+    VERIFY(tool.unblockAttempts == 1);  // it does go to Windows
+    VERIFY(!tool.isBlockInWindows);
 
-    uint64_t failingId = oldTunnelPermit;
-    const auto deleteById = [&](uint64_t id) {
-        if (id == failingId) {
-            return scoped_permits::DeleteResult::kFailed;
-        }
-        return wfp.remove(id) ? scoped_permits::DeleteResult::kDeleted : scoped_permits::DeleteResult::kNotFound;
-    };
-    const auto noSublayer = []() { return scoped_permits::DeleteResult::kDeleted; };
-    // Lifting the block (enableIPv6).
-    const auto unblock = [&]() {
-        wfp.begin();
-        const std::vector<uint64_t> listed(wfp.working.begin(), wfp.working.end());
-        const bool isCommitted = scoped_permits::removeSublayerAndFilters(true, listed, deleteById, noSublayer);
-        if (isCommitted) {
-            wfp.commit();
-            isBlocked = false;
-        } else {
-            wfp.abort();
-        }
-        requests.onAttempt(Request::kUnblock, isCommitted);
-        return isCommitted;
-    };
+    // And reports a failure instead of success.
+    FakeIpv6Firewall failing;
+    failing.isBlockInWindows = true;
+    failing.failNextCommits = 1;
+    VERIFY(!failing.requestUnblock());
+    VERIFY(failing.isBlockInWindows && failing.sync.isPending());
+    failing.retry();
+    VERIFY(!failing.isBlockInWindows && !failing.sync.isPending());
 
-    VERIFY(!unblock());
-    VERIFY(wfp.installed.count(oldBlock) == 1 && wfp.installed.count(oldTunnelPermit) == 1);
-    VERIFY(isBlocked);  // not recorded as lifted
-    VERIFY(requests.pending() == Request::kUnblock);
+    // Once confirmed lifted, another lift has nothing to do.
+    VERIFY(failing.requestUnblock() && failing.unblockAttempts == 2);
+}
 
-    // The retry once the deletion works.
-    failingId = 0;
-    VERIFY(requests.pending() == Request::kUnblock && unblock());
-    VERIFY(wfp.installed.empty() && !isBlocked && requests.pending() == Request::kNone);
+void testIpv6PendingUnblockSurvivesSettingsRefresh()
+{
+    // Connected: IPv6 blocked. Disconnect: the lift fails; then split tunneling refreshes its state.
+    FakeIpv6Firewall fw;
+    VERIFY(fw.requestBlock());
+    fw.failNextCommits = 1;
+    VERIFY(!fw.requestUnblock());
+    VERIFY(fw.isBlockInWindows);
+    fw.settingsChanged();  // must not turn the pending lift into a block
+    VERIFY(fw.sync.step() == scoped_permits::Ipv6BlockSync::Step::kUnblock);
+    fw.retry();
+    VERIFY(!fw.isBlockInWindows && !fw.sync.isPending());
 
-    // A newer request replaces a pending one.
-    requests.onAttempt(Request::kBlock, false);
-    requests.onAttempt(Request::kUnblock, true);
-    VERIFY(requests.pending() == Request::kNone);
+    // While blocked, a settings change does rebuild.
+    VERIFY(fw.requestBlock());
+    fw.failNextPermits = 1;
+    fw.settingsChanged();
+    VERIFY(fw.isBlockInWindows && !fw.isExcludedPermitIn && fw.sync.isPending());
+}
+
+void testIpv6MissingPermitRetriedWithBlockKept()
+{
+    // The block commits but Throne's IPv6 permit could not be added: reported as blocked (connected
+    // may be shown: nothing leaks), and the permit is retried while the block stays.
+    FakeIpv6Firewall fw;
+    fw.failNextPermits = 1;
+    VERIFY(fw.requestBlock());
+    VERIFY(fw.isBlockInWindows && !fw.isExcludedPermitIn);
+    VERIFY(fw.sync.step() == scoped_permits::Ipv6BlockSync::Step::kBlock);
+    fw.retry();
+    VERIFY(fw.isBlockInWindows && fw.isExcludedPermitIn && !fw.sync.isPending());
+
+    // A block that does not commit is not reported as in place.
+    FakeIpv6Firewall aborted;
+    aborted.failNextCommits = 1;
+    VERIFY(!aborted.requestBlock());
+    VERIFY(!aborted.isBlockInWindows && aborted.sync.isPending());
+    VERIFY(!aborted.sync.isBlockInstalled());
+
+    // An in-place address update that fails leads to a rebuild.
+    FakeIpv6Firewall update;
+    VERIFY(update.requestBlock());
+    VERIFY(update.sync.canUpdateInPlace());
+    update.sync.onUpdateFailed();
+    VERIFY(!update.sync.canUpdateInPlace() && update.sync.step() == scoped_permits::Ipv6BlockSync::Step::kBlock);
+    update.retry();
+    VERIFY(!update.sync.isPending());
 }
 
 } // namespace
@@ -1219,7 +1306,9 @@ int main()
     testBootSettingFromRegistry();
     testUnreadableAlwaysOnSettingKeepsSavedRules();
     testFailedBootSettingWriteIsRetried();
-    testIpv6FirewallKeepsRulesUntilCommitted();
+    testIpv6UnblockChecksWindowsNotMemory();
+    testIpv6PendingUnblockSurvivesSettingsRefresh();
+    testIpv6MissingPermitRetriedWithBlockKept();
     if (g_failures == 0) {
         printf("All scoped permit tests passed.\n");
     }

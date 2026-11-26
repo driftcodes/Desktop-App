@@ -308,15 +308,16 @@ bool Helper_win::enableRAS()
     return success;
 }
 
-void Helper_win::setIPv6EnabledInFirewall(bool b, bool bAllowLanTraffic, bool bIsCustomConfig)
+bool Helper_win::setIPv6EnabledInFirewall(bool b, bool bAllowLanTraffic, bool bIsCustomConfig)
 {
     auto result = sendCommand(HelperCommand::setIPv6EnabledInFirewall, b, bAllowLanTraffic, bIsCustomConfig);
-    bool isDone = true;
+    bool isDone = false;  // no answer: not confirmed
     deserializeAnswer(result, isDone);
     if (!isDone) {
-        // The helper keeps the IPv6 rules in place and retries.
+        // The helper keeps the IPv6 rules in place as they were and retries.
         qCCritical(LOG_BASIC) << "setIPv6EnabledInFirewall(" << b << "): not applied yet; the helper retries";
     }
+    return isDone;
 }
 
 bool Helper_win::setFirewallOnBoot(bool b)

@@ -57,6 +57,14 @@ inline bool shouldApplyConnectedFirewall(bool isWanted, bool isActuallyOnQuery)
 // connected-state one (resendConnected() sends it). A complete connecting-state firewall is not.
 bool ensureConnectedFirewallReady(FirewallController &controller, const std::function<void()> &resendConnected);
 
+// A required protection step reported by the helper (Windows: the IPv6 block outside the tunnel, which
+// is installed when connected whatever the firewall setting): retried once if it was not applied, and
+// the result decides whether connected may be reported. The helper keeps retrying in the background.
+inline bool ensureStepApplied(bool isApplied, const std::function<bool()> &retry)
+{
+    return isApplied || retry();
+}
+
 // isFirewallReady for the controller, resending once (resend()) if it is not: what the engine checks
 // before connecting, before each attempt and before reporting connected.
 bool ensureFirewallReady(FirewallController &controller, const std::function<void()> &resend);

@@ -741,18 +741,72 @@ private:
     bool isTurnOffPending_ = false;
 };
 
-// Ipv6Firewall: its last request (block IPv6 outside the tunnel, or lift the block), retried while it
-// has not been committed. A failed attempt is aborted, so the rules in place stay as they were; a
-// newer request replaces it.
-class Ipv6FirewallRequests
+// Ipv6Firewall: the IPv6 block (outside the tunnel) requested apart from what is installed. A block
+// request rebuilds the rules (tunnel adapter, Allow LAN and split tunneling as they are now); one that
+// commits has its blocks in, and may still miss a permit (an excluded app's IPv6, say), which is
+// retried while the blocks stay. Lifting it is retried until committed and checked gone; what a
+// previous process left installed is unknown, so the first lift always runs. A settings change (split
+// tunneling) rebuilds only while the block is wanted: it does not turn a pending lift into a block.
+class Ipv6BlockSync
 {
 public:
-    enum class Request { kNone, kBlock, kUnblock };
-    void onAttempt(Request request, bool isCommitted) { pending_ = isCommitted ? Request::kNone : request; }
-    Request pending() const { return pending_; }
+    enum class Step { kNothing, kBlock, kUnblock };
+
+    void requestBlock()
+    {
+        hasRequest_ = true;
+        isBlockWanted_ = true;
+        isRebuildNeeded_ = true;
+    }
+    void requestUnblock()
+    {
+        hasRequest_ = true;
+        isBlockWanted_ = false;
+    }
+    // Split tunneling's mode, apps or addresses changed.
+    void onSettingsChanged()
+    {
+        if (isBlockWanted_) {
+            isRebuildNeeded_ = true;
+        }
+    }
+
+    Step step() const
+    {
+        if (!hasRequest_) {
+            return Step::kNothing;
+        }
+        if (isBlockWanted_) {
+            const bool isDone = installed_ == Installed::kBlocked && !isRebuildNeeded_ && arePermitsComplete_;
+            return isDone ? Step::kNothing : Step::kBlock;
+        }
+        return installed_ == Installed::kUnblocked ? Step::kNothing : Step::kUnblock;
+    }
+    bool isPending() const { return step() != Step::kNothing; }
+    // Whether the installed block may be updated in place (its address filters), rather than rebuilt.
+    bool canUpdateInPlace() const { return isBlockWanted_ && installed_ == Installed::kBlocked && !isRebuildNeeded_; }
+
+    // A block rebuild committed with its blocks in; arePermitsComplete false if a permit is missing.
+    void onBlockCommitted(bool arePermitsComplete)
+    {
+        installed_ = Installed::kBlocked;
+        isRebuildNeeded_ = false;
+        arePermitsComplete_ = arePermitsComplete;
+    }
+    void onUnblockCommitted() { installed_ = Installed::kUnblocked; }
+    // An in-place update that did not commit: the next attempt rebuilds.
+    void onUpdateFailed() { isRebuildNeeded_ = true; }
+    // An attempt that did not commit leaves the rules (and this) as they were.
+    void onFailed() {}
+    bool isBlockInstalled() const { return installed_ == Installed::kBlocked; }
 
 private:
-    Request pending_ = Request::kNone;
+    enum class Installed { kUnknown, kBlocked, kUnblocked };
+    bool hasRequest_ = false;
+    bool isBlockWanted_ = false;
+    bool isRebuildNeeded_ = false;
+    bool arePermitsComplete_ = true;
+    Installed installed_ = Installed::kUnknown;
 };
 
 } // namespace scoped_permits

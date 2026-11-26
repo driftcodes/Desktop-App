@@ -188,6 +188,13 @@ Emergency Connect is unchanged and never uses the proxy.
   step. If one of them cannot be deleted, nothing is removed, the DNS block stays, and the helper
   tries again. The firewall removal tool follows the same order. The separate IPv6 block works the
   same way: a change that cannot be completed is not applied, and is retried.
+- **IPv6 while connected.** Windows blocks IPv6 outside the tunnel whenever you are connected, even
+  with the firewall off. The app now waits for that block before it shows Connected. If the block
+  cannot be installed (after one retry), it disconnects with a leak-protection error instead. If an
+  excluded app's IPv6 permit (Throne's, say) is missing, the block stays, and the helper retries the
+  permit. Lifting the block is checked against Windows itself, so the removal tool also removes a
+  block an earlier run left behind. A pending lift is not turned back into a block by a split
+  tunneling change.
 
 ### Reconnecting
 

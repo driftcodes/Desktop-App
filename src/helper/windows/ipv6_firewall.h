@@ -21,8 +21,10 @@ public:
 
     void release();
 
-    // Lift / install the IPv6 block. false if not committed: the rules in place stay as they were, and
-    // the request is retried by retryPending() (periodic) until a newer one replaces it.
+    // Lift the IPv6 block: true once it is committed and confirmed gone (checked against Windows,
+    // whatever this process installed). Install it: true once committed with its blocks in (a missing
+    // permit is retried meanwhile). false: the rules in place stay as they were. What is not done yet
+    // is retried by retryPending() (periodic) until a newer request replaces it.
     bool enableIPv6();
     bool disableIPv6(bool allowLanTraffic, bool isCustomConfig);
     void retryPending();
@@ -44,16 +46,20 @@ private:
     FwpmWrapper &fwpmWrapper_;
     GUID subLayerGUID_;
     std::recursive_mutex mutex_;
-    bool isDisabled_ = false;
     bool allowLanTraffic_ = false;
     bool isCustomConfig_ = false;
     SplitTunnelMode splitTunnelMode_ = SplitTunnelMode::Disabled;
     AppsIds splitTunnelAppsIds_;
     std::vector<types::IpAddressRange> whitelistIps_;
     std::vector<UINT64> whitelistFilterIds_;
-    scoped_permits::Ipv6FirewallRequests requests_;
+    // The block requested apart from what is installed.
+    scoped_permits::Ipv6BlockSync sync_;
+    bool blockImpl();
+    bool unblockImpl();
+    // false if the state could not be read.
+    bool isSublayerPresent(HANDLE engineHandle, bool &isPresent);
     // false if a required block could not be added.
-    bool addFilters(HANDLE engineHandle, bool allowLanTraffic, bool isCustomConfig);
+    bool addFilters(HANDLE engineHandle, bool allowLanTraffic, bool isCustomConfig, bool &arePermitsComplete);
     bool applyWhitelistFiltersLocked(HANDLE engineHandle);
     // false if a filter could not be deleted (and was not already gone).
     bool removeWhitelistFiltersLocked(HANDLE engineHandle);
