@@ -40,6 +40,22 @@ bool ensureFirewallReady(FirewallController &controller, const std::function<voi
     return isFirewallReady(true, controller.isFirewallComplete(), controller.firewallActualState());
 }
 
+bool ensureConnectedFirewallReady(FirewallController &controller, const std::function<void()> &resendConnected)
+{
+    if (!controller.isFirewallWanted()) {
+        return true;  // meant to be off
+    }
+    const auto isReady = [&controller]() {
+        return isFirewallReady(true, controller.isFirewallComplete(), controller.firewallActualState()) &&
+               controller.isConnectedStateCommitted();
+    };
+    if (isReady()) {
+        return true;
+    }
+    resendConnected();
+    return isReady();
+}
+
 void leaveConnection(FirewallController &controller, FirewallExceptions &exceptions,
                      const std::function<QSet<QString>()> &notConnectedIps,
                      const std::function<QSet<QString>()> &windscribeOnlyIps, bool allowLanTraffic, bool isCustomConfig)

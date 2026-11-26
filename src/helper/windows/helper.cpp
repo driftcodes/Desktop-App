@@ -59,6 +59,8 @@ bool Helper::onInit()
     FirewallFilter::instance(&fwpmWrapper_);
     Ipv6Firewall::instance(&fwpmWrapper_);
     SplitTunneling::instance(&fwpmWrapper_);
+    // A split-tunnel permit update (an excluded app or IP added or removed) that failed is retried.
+    DnsFirewall::instance().setPeriodicTask([]() { FirewallFilter::instance().retryPendingSplitTunnelUpdate(); });
 
     setStatus(SERVICE_START_PENDING);
 

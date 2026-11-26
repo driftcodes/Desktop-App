@@ -46,6 +46,17 @@ inline bool isFirewallReady(bool isWanted, bool isComplete, bool isActuallyOn)
 void applyConnectedState(FirewallController &controller, FirewallExceptions &exceptions, const QString &connectedIp,
                          bool allowLanTraffic, bool isCustomConfig);
 
+// Whether the engine applies the connected-state firewall once the tunnel is up: when the firewall is
+// meant to be on, also if a status query fails then (the query alone decided before).
+inline bool shouldApplyConnectedFirewall(bool isWanted, bool isActuallyOnQuery)
+{
+    return isWanted || isActuallyOnQuery;
+}
+
+// Before reporting connected: like ensureFirewallReady, but the request applied completely must be the
+// connected-state one (resendConnected() sends it). A complete connecting-state firewall is not.
+bool ensureConnectedFirewallReady(FirewallController &controller, const std::function<void()> &resendConnected);
+
 // isFirewallReady for the controller, resending once (resend()) if it is not: what the engine checks
 // before connecting, before each attempt and before reporting connected.
 bool ensureFirewallReady(FirewallController &controller, const std::function<void()> &resend);

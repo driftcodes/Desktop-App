@@ -299,6 +299,23 @@ private:
     std::vector<Ids> saved_;
 };
 
+// Deleting filters by their recorded ids, inside a transaction. A filter that is already gone counts
+// as deleted; any other failure makes the whole step fail, so the caller aborts the transaction (the
+// commit would otherwise go through with that permit still installed) and keeps the recorded ids.
+enum class DeleteResult { kDeleted, kNotFound, kFailed };
+
+template <typename Id, typename DeleteById>
+inline bool deleteRecordedFilters(const std::vector<Id> &ids, DeleteById deleteById)
+{
+    bool isEveryOneGone = true;
+    for (const Id &id : ids) {
+        if (deleteById(id) == DeleteResult::kFailed) {
+            isEveryOneGone = false;
+        }
+    }
+    return isEveryOneGone;
+}
+
 // firewallOn with the DNS baseline: the baseline goes in first. Without it in place the main firewall
 // is turned on without its LAN permit (so the LAN DNS path stays closed), the request counts as
 // incomplete for the client, and the LAN permit is added once the baseline is in.

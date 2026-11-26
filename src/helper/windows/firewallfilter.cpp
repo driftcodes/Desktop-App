@@ -157,18 +157,24 @@ void FirewallFilter::off()
     std::lock_guard<std::recursive_mutex> guard(mutex_);
 
     HANDLE hEngine = fwpmWrapper_.getHandleAndLock();
-    runTransaction([&]() { offImpl(hEngine); });
+    runTransaction([&]() { offImpl(hEngine); return true; });
     fwpmWrapper_.unlock();
 }
 
-bool FirewallFilter::runTransaction(const std::function<void()> &body)
+bool FirewallFilter::runTransaction(const std::function<bool()> &body)
 {
     scoped_permits::FilterIdsSnapshot<std::vector<UINT64>> ids({&filterIdsApps_, &filterIdsSplitRoutingIps_});
     if (!fwpmWrapper_.beginTransaction()) {
         spdlog::error("FirewallFilter: could not begin a transaction; nothing changed");
         return false;
     }
-    body();
+    if (!body()) {
+        // A filter could not be deleted (it may still be in force) or added: commit nothing.
+        spdlog::error("FirewallFilter: a step failed; aborted, the filters in place (and their recorded ids) stay");
+        fwpmWrapper_.abortTransaction();
+        ids.rollback();
+        return false;
+    }
     if (fwpmWrapper_.endTransaction()) {
         return true;
     }
@@ -176,6 +182,18 @@ bool FirewallFilter::runTransaction(const std::function<void()> &body)
     fwpmWrapper_.abortTransaction();
     ids.rollback();
     return false;
+}
+
+void FirewallFilter::retryPendingSplitTunnelUpdate()
+{
+    std::lock_guard<std::recursive_mutex> guard(mutex_);
+    if (!pendingSplitTunnelUpdate_) {
+        return;
+    }
+    auto update = std::move(pendingSplitTunnelUpdate_);
+    pendingSplitTunnelUpdate_ = nullptr;
+    spdlog::info("FirewallFilter: retrying a split-tunnel filter update that failed");
+    update();  // sets itself pending again if it fails again
 }
 
 bool FirewallFilter::currentStatus()
@@ -221,16 +239,18 @@ void FirewallFilter::setSplitTunnelingEnabled(bool isExclusiveMode)
     const bool wasExclusive = isSplitTunnelingExclusiveMode_;
     isSplitTunnelingEnabled_ = true;
     isSplitTunnelingExclusiveMode_ = isExclusiveMode;
+    pendingSplitTunnelUpdate_ = nullptr;  // superseded
     const bool isDone = runTransaction([&]() {
-        removeAllSplitTunnelingFilters(hEngine);
-        if (currentStatusImpl(hEngine) == true) {
-            addPermitFilterForAppsIds(hEngine);
-            addPermitFilterForSplitRoutingWhitelistIps(hEngine);
+        bool isOk = removeAllSplitTunnelingFilters(hEngine);
+        if (isOk && currentStatusImpl(hEngine) == true) {
+            isOk = addPermitFilterForAppsIds(hEngine) && addPermitFilterForSplitRoutingWhitelistIps(hEngine);
         }
+        return isOk;
     });
     if (!isDone) {
         isSplitTunnelingEnabled_ = wasEnabled;
         isSplitTunnelingExclusiveMode_ = wasExclusive;
+        pendingSplitTunnelUpdate_ = [this, isExclusiveMode]() { setSplitTunnelingEnabled(isExclusiveMode); };
     }
     fwpmWrapper_.unlock();
 }
@@ -240,11 +260,14 @@ void FirewallFilter::setSplitTunnelingDisabled()
     std::lock_guard<std::recursive_mutex> guard(mutex_);
 
     HANDLE hEngine = fwpmWrapper_.getHandleAndLock();
-    const bool isDone = runTransaction([&]() { removeAllSplitTunnelingFilters(hEngine); });
+    pendingSplitTunnelUpdate_ = nullptr;  // superseded
+    const bool isDone = runTransaction([&]() { return removeAllSplitTunnelingFilters(hEngine); });
     fwpmWrapper_.unlock();
 
     if (isDone) {
         isSplitTunnelingEnabled_ = false;
+    } else {
+        pendingSplitTunnelUpdate_ = [this]() { setSplitTunnelingDisabled(); };
     }
 }
 
@@ -260,6 +283,7 @@ void FirewallFilter::setVpnAppsIds(const AppsIds &appsIds)
     if (vpnAppsIds_ == appsIds) {
         return;
     }
+    pendingSplitTunnelUpdate_ = nullptr;  // superseded
     const AppsIds previous = vpnAppsIds_;
     vpnAppsIds_ = appsIds;
 
@@ -267,8 +291,9 @@ void FirewallFilter::setVpnAppsIds(const AppsIds &appsIds)
 
     // if split tunneling is ON and firewall is ON then add filter for apps immediately
     if (isSplitTunnelingEnabled_ && currentStatusImpl(hEngine) == true) {
-        if (!runTransaction([&]() { removeAppsSplitTunnelingFilter(hEngine); addPermitFilterForAppsIds(hEngine); })) {
+        if (!runTransaction([&]() { return removeAppsSplitTunnelingFilter(hEngine) && addPermitFilterForAppsIds(hEngine); })) {
             vpnAppsIds_ = previous;  // so sending the same list again retries
+            pendingSplitTunnelUpdate_ = [this, appsIds]() { setVpnAppsIds(appsIds); };
         }
     }
 
@@ -281,6 +306,7 @@ void FirewallFilter::setSplitTunnelingAppsIds(const AppsIds &appsIds)
     if (appsIds_ == appsIds) {
         return;
     }
+    pendingSplitTunnelUpdate_ = nullptr;  // superseded
     const AppsIds previous = appsIds_;
     appsIds_ = appsIds;
 
@@ -288,8 +314,9 @@ void FirewallFilter::setSplitTunnelingAppsIds(const AppsIds &appsIds)
 
     // if split tunneling is ON and firewall is ON then add filter for apps immediately
     if (isSplitTunnelingEnabled_ && currentStatusImpl(hEngine) == true) {
-        if (!runTransaction([&]() { removeAppsSplitTunnelingFilter(hEngine); addPermitFilterForAppsIds(hEngine); })) {
-            appsIds_ = previous;  // the old permits stay; sending the same list again retries
+        if (!runTransaction([&]() { return removeAppsSplitTunnelingFilter(hEngine) && addPermitFilterForAppsIds(hEngine); })) {
+            appsIds_ = previous;  // the old permits stay; retried (and sending the same list again retries)
+            pendingSplitTunnelUpdate_ = [this, appsIds]() { setSplitTunnelingAppsIds(appsIds); };
         }
     }
 
@@ -302,6 +329,7 @@ void FirewallFilter::setSplitTunnelingWhitelistIps(const std::vector<types::IpAd
     if (splitRoutingIps_ == ips) {
         return;
     }
+    pendingSplitTunnelUpdate_ = nullptr;  // superseded
     const std::vector<types::IpAddressRange> previous = splitRoutingIps_;
     splitRoutingIps_ = ips;
 
@@ -309,8 +337,9 @@ void FirewallFilter::setSplitTunnelingWhitelistIps(const std::vector<types::IpAd
 
     // if split tunneling is ON and firewall is ON then add filter for ips immediately
     if (isSplitTunnelingEnabled_ && currentStatusImpl(hEngine) == true) {
-        if (!runTransaction([&]() { removeIpsSplitTunnelingFilter(hEngine); addPermitFilterForSplitRoutingWhitelistIps(hEngine); })) {
-            splitRoutingIps_ = previous;  // the old permits stay; sending the same list again retries
+        if (!runTransaction([&]() { return removeIpsSplitTunnelingFilter(hEngine) && addPermitFilterForSplitRoutingWhitelistIps(hEngine); })) {
+            splitRoutingIps_ = previous;  // the old permits stay; retried (and sending the same list again retries)
+            pendingSplitTunnelUpdate_ = [this, ips]() { setSplitTunnelingWhitelistIps(ips); };
         }
     }
     fwpmWrapper_.unlock();
@@ -410,8 +439,13 @@ bool FirewallFilter::addFilters(HANDLE engineHandle, const wchar_t *connectingIp
 
     // add permit filter for split tunneling app ids and ips
     if (isSplitTunnelingEnabled_) {
-        addPermitFilterForAppsIds(engineHandle);
-        addPermitFilterForSplitRoutingWhitelistIps(engineHandle);
+        // A missing split-tunnel permit fails closed (the excluded app is blocked); reported incomplete.
+        if (!addPermitFilterForAppsIds(engineHandle)) {
+            isComplete = false;
+        }
+        if (!addPermitFilterForSplitRoutingWhitelistIps(engineHandle)) {
+            isComplete = false;
+        }
     }
 
     addPermitFilterForVpnAndSystemServices(engineHandle, connectingIp);
@@ -572,7 +606,7 @@ void FirewallFilter::addPermitFilterForVpnAndSystemServices(HANDLE engineHandle,
     }
 }
 
-void FirewallFilter::addPermitFilterForAppsIds(HANDLE engineHandle)
+bool FirewallFilter::addPermitFilterForAppsIds(HANDLE engineHandle)
 {
     bool ret = true;
     if (isSplitTunnelingExclusiveMode_) {
@@ -588,12 +622,13 @@ void FirewallFilter::addPermitFilterForAppsIds(HANDLE engineHandle)
     if (!ret) {
         spdlog::error("Could not add split tunnel app filters");
     }
+    return ret;
 }
 
-void FirewallFilter::addPermitFilterForSplitRoutingWhitelistIps(HANDLE engineHandle)
+bool FirewallFilter::addPermitFilterForSplitRoutingWhitelistIps(HANDLE engineHandle)
 {
     if (!isSplitTunnelingExclusiveMode_ || splitRoutingIps_.empty()) {
-        return;
+        return true;
     }
 
     // addFilterV4/addFilterV6 internally filter the dual-stack vector by family and become
@@ -602,36 +637,49 @@ void FirewallFilter::addPermitFilterForSplitRoutingWhitelistIps(HANDLE engineHan
     if (!ret) {
         spdlog::error("Could not add split tunnel IPv4 filters");
     }
+    const bool isV4Added = ret;
     ret = Utils::addFilterV6(engineHandle, &filterIdsSplitRoutingIps_, FWP_ACTION_PERMIT, 2, subLayerGUID_, FIREWALL_SUBLAYER_NAMEW, nullptr, &splitRoutingIps_, 0, 0, nullptr, false);
     if (!ret) {
         spdlog::error("Could not add split tunnel IPv6 filters");
     }
+    return isV4Added && ret;
 }
 
-void FirewallFilter::removeAllSplitTunnelingFilters(HANDLE engineHandle)
+bool FirewallFilter::removeAllSplitTunnelingFilters(HANDLE engineHandle)
 {
-    removeAppsSplitTunnelingFilter(engineHandle);
-    removeIpsSplitTunnelingFilter(engineHandle);
+    const bool isAppsRemoved = removeAppsSplitTunnelingFilter(engineHandle);
+    const bool isIpsRemoved = removeIpsSplitTunnelingFilter(engineHandle);
+    return isAppsRemoved && isIpsRemoved;
 }
 
-void FirewallFilter::removeAppsSplitTunnelingFilter(HANDLE engineHandle)
+namespace {
+scoped_permits::DeleteResult deleteFilter(HANDLE engineHandle, UINT64 id, const char *what)
 {
-    for (size_t i = 0; i < filterIdsApps_.size(); ++i) {
-        DWORD ret = FwpmFilterDeleteById0(engineHandle, filterIdsApps_[i]);
-        if (ret != ERROR_SUCCESS) {
-            spdlog::error("FirewallFilter::removeAppsSplitTunnelingFilter(), FwpmFilterDeleteById0 failed: {}", ret);
-        }
+    const DWORD ret = FwpmFilterDeleteById0(engineHandle, id);
+    if (ret == ERROR_SUCCESS) {
+        return scoped_permits::DeleteResult::kDeleted;
     }
+    if (ret == FWP_E_FILTER_NOT_FOUND) {
+        return scoped_permits::DeleteResult::kNotFound;
+    }
+    spdlog::error("FirewallFilter: deleting a {} split-tunnel filter failed: {}", what, ret);
+    return scoped_permits::DeleteResult::kFailed;
+}
+} // namespace
+
+bool FirewallFilter::removeAppsSplitTunnelingFilter(HANDLE engineHandle)
+{
+    // Cleared even on failure: the caller then aborts the transaction and puts the ids back.
+    const bool isRemoved = scoped_permits::deleteRecordedFilters(
+        filterIdsApps_, [&](UINT64 id) { return deleteFilter(engineHandle, id, "app"); });
     filterIdsApps_.clear();
+    return isRemoved;
 }
 
-void FirewallFilter::removeIpsSplitTunnelingFilter(HANDLE engineHandle)
+bool FirewallFilter::removeIpsSplitTunnelingFilter(HANDLE engineHandle)
 {
-    for (size_t i = 0; i < filterIdsSplitRoutingIps_.size(); ++i) {
-        DWORD ret = FwpmFilterDeleteById0(engineHandle, filterIdsSplitRoutingIps_[i]);
-        if (ret != ERROR_SUCCESS) {
-            spdlog::error("FirewallFilter::removeIpsSplitTunnelingFilter(), FwpmFilterDeleteById0 failed: {}", ret);
-        }
-    }
+    const bool isRemoved = scoped_permits::deleteRecordedFilters(
+        filterIdsSplitRoutingIps_, [&](UINT64 id) { return deleteFilter(engineHandle, id, "IP"); });
     filterIdsSplitRoutingIps_.clear();
+    return isRemoved;
 }

@@ -27,6 +27,10 @@ public:
         if (failNextApplies > 0) {
             --failNextApplies;
         }
+        if (isComplete_) {
+            // As the real controllers do: only a request applied successfully is committed.
+            commitFirewallOn(connectingIp, ips, allowLan, isCustom, isVpnConnected, windscribeOnlyIps);
+        }
         ++onCalls;
         lastConnectingIp = connectingIp;
         lastIps = ips;
@@ -40,11 +44,19 @@ public:
         isComplete_ = true;
         ++offCalls;
     }
-    bool firewallActualState() override { return !failStateQuery && isOn_; }
+    bool firewallActualState() override
+    {
+        if (failNextStateQueries > 0) {
+            --failNextStateQueries;
+            return false;
+        }
+        return !failStateQuery && isOn_;
+    }
     bool isFirewallComplete() const override { return isComplete_; }
 
     bool failApply = false;       // the helper reports the firewall incomplete (e.g. no DNS baseline)
     int failNextApplies = 0;      // only the next ones
+    int failNextStateQueries = 0; // only the next state queries fail
     bool failStateQuery = false;  // the helper's state query fails (reads as off)
     bool isComplete_ = true;
     void setVpnInterface_posix(const QString &) override {}
@@ -1197,6 +1209,55 @@ void TestFirewallPolicy::testConnectedRetrySendsConnectedRules()
     QCOMPARE(controller.lastIps, connected);
     QCOMPARE(controller.lastConnectingIp, QString("203.0.113.5"));
     QVERIFY(controller.lastWindscribeOnlyIps.isEmpty());
+}
+
+void TestFirewallPolicy::testConnectedReportNeedsConnectedRequest()
+{
+    using namespace firewall_policy;
+    FirewallExceptions exceptions = makeExceptions(true);
+    const auto applyConnected = [&](FakeFirewallController &controller) {
+        applyConnectedState(controller, exceptions, "203.0.113.5", true, true);
+    };
+
+    // Always On: the connecting-state rules are in and complete.
+    FakeFirewallController controller(false);
+    controller.firewallOn(exceptions.connectingIp(), exceptions.getIPAddressesForNotConnectedState(false, true), true, true,
+                          false, exceptions.getWindscribeOnlyIPAddressesForNotConnectedState(false, true));
+    QVERIFY(controller.isFirewallComplete());
+    QVERIFY(!controller.isConnectedStateCommitted());
+    const int callsBefore = controller.onCalls;
+
+    // The tunnel is up; the first status read fails. The engine still applies the connected rules,
+    // since the firewall is meant to be on.
+    controller.failNextStateQueries = 1;
+    const bool isApplied = shouldApplyConnectedFirewall(controller.isFirewallWanted(), controller.firewallActualState());
+    QVERIFY(isApplied);
+    applyConnected(controller);
+    QCOMPARE(controller.onCalls, callsBefore + 1);
+    QVERIFY(controller.lastIsVpnConnected);
+    QVERIFY(ensureConnectedFirewallReady(controller, [&]() { applyConnected(controller); }));
+
+    // Had that apply been skipped (as before), the final check does not accept the complete
+    // connecting-state firewall: it sends the connected request, and only then is it ready.
+    FakeFirewallController skipped(false);
+    skipped.firewallOn(exceptions.connectingIp(), exceptions.getIPAddressesForNotConnectedState(false, true), true, true,
+                       false, exceptions.getWindscribeOnlyIPAddressesForNotConnectedState(false, true));
+    skipped.failNextStateQueries = 1;
+    QVERIFY(!skipped.firewallActualState());  // the read that failed
+    QVERIFY(skipped.firewallActualState());   // the next one succeeds
+    const int skippedCalls = skipped.onCalls;
+    QVERIFY(ensureConnectedFirewallReady(skipped, [&]() { applyConnected(skipped); }));
+    QCOMPARE(skipped.onCalls, skippedCalls + 1);
+    QVERIFY(skipped.lastIsVpnConnected);
+    QCOMPARE(skipped.lastConnectingIp, QString("203.0.113.5"));
+    QVERIFY(skipped.lastWindscribeOnlyIps.isEmpty());
+
+    // And if that connected request is not applied completely either: not ready.
+    FakeFirewallController failing(false);
+    failing.firewallOn(exceptions.connectingIp(), exceptions.getIPAddressesForNotConnectedState(false, true), true, true,
+                       false, exceptions.getWindscribeOnlyIPAddressesForNotConnectedState(false, true));
+    failing.failApply = true;
+    QVERIFY(!ensureConnectedFirewallReady(failing, [&]() { applyConnected(failing); }));
 }
 
 QTEST_MAIN(TestFirewallPolicy)

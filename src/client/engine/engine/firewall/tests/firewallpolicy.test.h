@@ -34,6 +34,7 @@ private slots:
     void testIgnoredConnectorRequestIsNotInstalled();
     void testFailedBaselineHoldsConnectionDespiteSessionFilter();
     void testConnectedRetrySendsConnectedRules();
+    void testConnectedReportNeedsConnectedRequest();
     void testRetryBacksOffAndStopsOnSuccess();
     void testDnsLeakFilterKeptAfterErrorUntilFirewallOff();
 };

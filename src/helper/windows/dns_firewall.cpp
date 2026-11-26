@@ -806,6 +806,20 @@ void DnsFirewall::checkForChanges()
         std::lock_guard<std::recursive_mutex> guard(mutex_);
         pendingLanHold_ = nullptr;
     }
+    std::function<void()> task;
+    {
+        std::lock_guard<std::recursive_mutex> guard(mutex_);
+        task = periodicTask_;
+    }
+    if (task) {
+        task();
+    }
+}
+
+void DnsFirewall::setPeriodicTask(std::function<void()> task)
+{
+    std::lock_guard<std::recursive_mutex> guard(mutex_);
+    periodicTask_ = std::move(task);
 }
 
 bool DnsFirewall::getDnsServers(std::set<types::IpAddress> &dnsServers)

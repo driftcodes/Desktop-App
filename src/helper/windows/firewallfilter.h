@@ -34,6 +34,8 @@ public:
     // blocks DNS to IPv6 link-local: while no DNS baseline is in place they would let any program
     // query a router's DNS.
     bool holdLanPermit();
+    // Retries a split-tunnel filter update (app or IP exclusions) that failed; called periodically.
+    void retryPendingSplitTunnelUpdate();
     bool currentStatus();
 
     // split tunnelling parameters
@@ -68,13 +70,18 @@ private:
     bool addLinkLocalDnsBlock(HANDLE engineHandle);
     // Runs body in one WFP transaction; if it does not commit, the recorded split-tunnel filter ids
     // are put back as they were (Windows keeps the old filters). Returns whether it committed.
-    bool runTransaction(const std::function<void()> &body);
-    void addPermitFilterForAppsIds(HANDLE engineHandle);
-    void addPermitFilterForSplitRoutingWhitelistIps(HANDLE engineHandle);
+    // body returns false when a step failed (e.g. a filter could not be deleted): aborted then.
+    bool runTransaction(const std::function<bool()> &body);
+    bool addPermitFilterForAppsIds(HANDLE engineHandle);
+    bool addPermitFilterForSplitRoutingWhitelistIps(HANDLE engineHandle);
 
-    void removeAppsSplitTunnelingFilter(HANDLE engineHandle);
-    void removeIpsSplitTunnelingFilter(HANDLE engineHandle);
-    void removeAllSplitTunnelingFilters(HANDLE engineHandle);
+    // false if a filter could not be deleted (and was not already gone).
+    bool removeAppsSplitTunnelingFilter(HANDLE engineHandle);
+    bool removeIpsSplitTunnelingFilter(HANDLE engineHandle);
+    bool removeAllSplitTunnelingFilters(HANDLE engineHandle);
+    // The split-tunnel update that failed last, retried by retryPendingSplitTunnelUpdate(); cleared
+    // by any newer update.
+    std::function<void()> pendingSplitTunnelUpdate_;
 
     std::vector<std::wstring> tapAdapters_;
 

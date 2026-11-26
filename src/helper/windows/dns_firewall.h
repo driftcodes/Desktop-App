@@ -66,6 +66,9 @@ public:
     // retries hold() until it succeeds, the baseline gets in, or the client's firewallOn/Off clears it.
     void setPendingLanHold(std::function<bool()> hold);
     void clearPendingLanHold();
+    // Run on every monitor tick (about every 2 s while the firewall is on), outside its lock: retries
+    // of other firewall updates that failed (split-tunnel permits).
+    void setPeriodicTask(std::function<void()> task);
 
 private:
     std::recursive_mutex mutex_;
@@ -87,6 +90,7 @@ private:
     bool isReadyNotificationPending_ = false;  // got in since the monitor last looked
     std::function<void()> baselineReadyCallback_;
     std::function<bool()> pendingLanHold_;
+    std::function<void()> periodicTask_;
     bool isBaselineDirty_ = false;
     bool isWaitingForExcludedApps_ = false;   // adopted at start: keep it until the client's list comes
     bool isExcludedAppsKnown_ = false;

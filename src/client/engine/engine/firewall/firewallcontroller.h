@@ -29,6 +29,9 @@ public:
     // Whether the firewall was last asked to be on (by firewallOn) rather than off: tells a firewall
     // that is intentionally off from one that should be on but is not (or whose state is unknown).
     bool isFirewallWanted() const { return isWanted_; }
+    // Whether the last firewallOn that was applied successfully (committed) was the connected-state
+    // one: a complete connecting-state firewall does not count for reporting connected.
+    bool isConnectedStateCommitted() const { return bInitialized_ && latestEnabledState_ && latestIsVpnConnected_; }
 
     virtual bool whitelistPorts(const api_responses::StaticIpPortsVector &ports);
     virtual bool deleteWhitelistPorts();

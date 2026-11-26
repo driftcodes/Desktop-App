@@ -585,6 +585,56 @@ void testFailedRebuildKeepsSplitTunnelIds()
     VERIFY(wfp.installed.empty());
 }
 
+void testOneFailedDeletionAbortsAndRetries()
+{
+    // Installed: Throne's app permit and its VLESS IP permit.
+    FakeWfp wfp;
+    std::vector<uint64_t> appIds;
+    std::vector<uint64_t> ipIds;
+    wfp.begin();
+    appIds.push_back(wfp.add());
+    ipIds.push_back(wfp.add());
+    wfp.commit();
+    const uint64_t throneApp = appIds[0];
+
+    // Both are being removed from the exclusions; Windows refuses to delete the app permit only. As
+    // FirewallFilter::runTransaction does: a failed step aborts, the recorded ids are kept.
+    uint64_t failingId = throneApp;
+    const auto deleteById = [&](uint64_t id) {
+        if (id == failingId) {
+            return scoped_permits::DeleteResult::kFailed;
+        }
+        return wfp.remove(id) ? scoped_permits::DeleteResult::kDeleted : scoped_permits::DeleteResult::kNotFound;
+    };
+    const auto removeBoth = [&]() {
+        scoped_permits::FilterIdsSnapshot<std::vector<uint64_t>> snapshot({&appIds, &ipIds});
+        wfp.begin();
+        const bool isAppGone = scoped_permits::deleteRecordedFilters(appIds, deleteById);
+        appIds.clear();
+        const bool isIpGone = scoped_permits::deleteRecordedFilters(ipIds, deleteById);
+        ipIds.clear();
+        if (isAppGone && isIpGone) {
+            wfp.commit();
+            return true;
+        }
+        wfp.abort();
+        snapshot.rollback();
+        return false;
+    };
+    VERIFY(!removeBoth());
+    // Nothing committed (the IP permit's deletion was in the same transaction), ids still known.
+    VERIFY(wfp.installed.size() == 2);
+    VERIFY(appIds.size() == 1 && ipIds.size() == 1);
+
+    // The retry: now both deletions go through.
+    failingId = 0;
+    VERIFY(removeBoth());
+    VERIFY(wfp.installed.empty());
+
+    // A filter that is already gone counts as deleted.
+    VERIFY(scoped_permits::deleteRecordedFilters(std::vector<uint64_t>{12345}, deleteById));
+}
+
 } // namespace
 
 int main()
@@ -606,6 +656,7 @@ int main()
     testMigrationKeepsOldBlockUntilNewCommitted();
     testMainFirewallCommitNeedsBothDefaultBlocks();
     testFailedRebuildKeepsSplitTunnelIds();
+    testOneFailedDeletionAbortsAndRetries();
     if (g_failures == 0) {
         printf("All scoped permit tests passed.\n");
     }

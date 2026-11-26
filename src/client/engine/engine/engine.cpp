@@ -1647,7 +1647,10 @@ void Engine::onConnectionManagerConnected()
         emit splitTunnelingStartFailed();
     }
 
-    if (firewallController_->firewallActualState() && !isFirewallAlreadyEnabled)
+    // Wanted on is enough: a status query that fails just now must not skip the connected rules.
+    if (firewall_policy::shouldApplyConnectedFirewall(firewallController_->isFirewallWanted(),
+                                                      firewallController_->firewallActualState()) &&
+        !isFirewallAlreadyEnabled)
     {
         applyConnectedFirewall();
     }
@@ -1722,9 +1725,11 @@ void Engine::onConnectionManagerConnected()
 #ifdef Q_OS_WIN
     // After every firewall change above (Automatic / After Connection turns it on only now): a firewall
     // that should be on must be completely applied, DNS baseline included, before this is published.
-    // A retry sends the connected-state request again (the connect state still says CONNECTING, so the
-    // generic update would send the not-connected rules).
-    if (!isFirewallDnsProtected([this]() { applyConnectedFirewall(); })) {
+    // The connected-state request itself must be confirmed (not the complete connecting-state one); a
+    // retry sends it again (the connect state still says CONNECTING, so the generic update would send
+    // the not-connected rules).
+    if (firewallController_ &&
+        !firewall_policy::ensureConnectedFirewallReady(*firewallController_, [this]() { applyConnectedFirewall(); })) {
         qCCritical(LOG_CONNECTION) << "The firewall could not be applied completely; disconnecting";
         pendingDisconnectError_ = ConnectError::kDnsLeakProtectionFailed;
         connectionManager_->clickDisconnect(DISCONNECTED_WITH_ERROR);
