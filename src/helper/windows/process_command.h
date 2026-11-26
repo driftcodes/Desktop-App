@@ -39,6 +39,10 @@ std::string getProcessesList(const std::string &pars);
 std::string whitelistPorts(const std::string &pars);
 std::string deleteWhitelistPorts(const std::string &pars);
 std::string enableDnsLeaksProtection(const std::string &pars);
+// Service start without a DNS baseline: removes the kept firewall's LAN permit, retried by the DNS
+// firewall's monitor until it works or the client's firewallOn/Off takes over.
+void startStartupLanHold();
+bool retryStartupLanHold();
 std::string disableDnsLeaksProtection(const std::string &pars);
 std::string reinstallWanIkev2(const std::string &pars);
 std::string enableWanIkev2(const std::string &pars);

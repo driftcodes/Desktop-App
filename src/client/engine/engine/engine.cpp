@@ -1601,12 +1601,7 @@ void Engine::onConnectionManagerConnected()
                                                 firewallController_->firewallActualState(), tunnelCarriesAllTraffic)) {
             case firewall_policy::AutomaticAction::TurnOn:
                 qCDebug(LOG_BASIC) << "Automatic enable firewall after connection";
-                firewallController_->firewallOn(
-                    connectionManager_->getLastConnectedIp(),
-                    firewallExceptions_.getIPAddressesForFirewallForConnectedState(),
-                    engineSettings_.isAllowLanTraffic(),
-                    locationId_.isCustomConfigsLocation(),
-                    true);
+                applyConnectedFirewall();
                 emit firewallStateChanged(true);
                 isFirewallAlreadyEnabled = true;
                 break;
@@ -1654,12 +1649,7 @@ void Engine::onConnectionManagerConnected()
 
     if (firewallController_->firewallActualState() && !isFirewallAlreadyEnabled)
     {
-        firewallController_->firewallOn(
-            connectionManager_->getLastConnectedIp(),
-            firewallExceptions_.getIPAddressesForFirewallForConnectedState(),
-            engineSettings_.isAllowLanTraffic(),
-            locationId_.isCustomConfigsLocation(),
-            true);
+        applyConnectedFirewall();
     }
 
 
@@ -1732,7 +1722,9 @@ void Engine::onConnectionManagerConnected()
 #ifdef Q_OS_WIN
     // After every firewall change above (Automatic / After Connection turns it on only now): a firewall
     // that should be on must be completely applied, DNS baseline included, before this is published.
-    if (!isFirewallDnsProtected()) {
+    // A retry sends the connected-state request again (the connect state still says CONNECTING, so the
+    // generic update would send the not-connected rules).
+    if (!isFirewallDnsProtected([this]() { applyConnectedFirewall(); })) {
         qCCritical(LOG_CONNECTION) << "The firewall could not be applied completely; disconnecting";
         pendingDisconnectError_ = ConnectError::kDnsLeakProtectionFailed;
         connectionManager_->clickDisconnect(DISCONNECTED_WITH_ERROR);
@@ -3278,6 +3270,12 @@ void Engine::onConnectStateChanged(CONNECT_STATE state, DISCONNECT_REASON reason
     WSNet::instance()->setIsConnectedToVpnState(state == CONNECT_STATE_CONNECTED);
 }
 
+void Engine::applyConnectedFirewall()
+{
+    firewall_policy::applyConnectedState(*firewallController_, firewallExceptions_, connectionManager_->getLastConnectedIp(),
+                                         engineSettings_.isAllowLanTraffic(), locationId_.isCustomConfigsLocation());
+}
+
 void Engine::updateProxySettings()
 {
     ProxyServerController::instance().updateProxySettings(engineSettings_.proxySettings());
@@ -3324,12 +3322,13 @@ void Engine::updateProxiedDnsLeakProtection(CONNECT_STATE state, DISCONNECT_REAS
     proxiedDnsLeakFilter_->onConnectState(state, requestProxySettings().isProxyEnabled(), keepAfterSession);
 }
 
-bool Engine::isFirewallDnsProtected()
+bool Engine::isFirewallDnsProtected(const std::function<void()> &resend)
 {
     if (!firewallController_) {
         return true;
     }
-    const bool isReady = firewall_policy::ensureFirewallReady(*firewallController_, [this]() { updateFirewallSettings(true); });
+    const bool isReady = firewall_policy::ensureFirewallReady(
+        *firewallController_, resend ? resend : std::function<void()>([this]() { updateFirewallSettings(true); }));
     if (!isReady) {
         qCCritical(LOG_BASIC) << "The firewall should be on but is not completely applied (DNS baseline); holding the connection";
     }

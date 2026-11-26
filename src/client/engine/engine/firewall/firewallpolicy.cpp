@@ -19,6 +19,13 @@ AutomaticAction afterConnected(FIREWALL_MODE mode, FIREWALL_WHEN when, bool isFi
     return AutomaticAction::None;
 }
 
+void applyConnectedState(FirewallController &controller, FirewallExceptions &exceptions, const QString &connectedIp,
+                         bool allowLanTraffic, bool isCustomConfig)
+{
+    controller.firewallOn(connectedIp, exceptions.getIPAddressesForFirewallForConnectedState(), allowLanTraffic,
+                          isCustomConfig, true);
+}
+
 bool ensureFirewallReady(FirewallController &controller, const std::function<void()> &resend)
 {
     if (!controller.isFirewallWanted()) {

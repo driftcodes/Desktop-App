@@ -1,5 +1,7 @@
 #pragma once
 
+#include <functional>
+
 #include "ws_branding.h"
 #include "apps_ids.h"
 #include "fwpm_wrapper.h"
@@ -64,6 +66,9 @@ private:
                     bool bHoldLanPermit, bool areDefaultBlocksAdded[2]);
     void addPermitFilterForVpnAndSystemServices(HANDLE engineHandle, const wchar_t *ip);
     bool addLinkLocalDnsBlock(HANDLE engineHandle);
+    // Runs body in one WFP transaction; if it does not commit, the recorded split-tunnel filter ids
+    // are put back as they were (Windows keeps the old filters). Returns whether it committed.
+    bool runTransaction(const std::function<void()> &body);
     void addPermitFilterForAppsIds(HANDLE engineHandle);
     void addPermitFilterForSplitRoutingWhitelistIps(HANDLE engineHandle);
 

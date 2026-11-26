@@ -311,6 +311,9 @@ struct FirewallOnRequest
 };
 std::mutex g_firewallOnMutex;
 std::optional<FirewallOnRequest> g_lanHeldRequest;
+// Service start without a DNS baseline: the firewall kept from before must lose its LAN permit until
+// the client's next firewallOn/Off (which clear this).
+bool g_isStartupLanHoldPending = false;
 
 bool applyFirewallOn(const FirewallOnRequest &request, bool holdLanPermit)
 {
@@ -339,6 +342,33 @@ void registerBaselineReadyCallback()
 }
 
 } // namespace
+
+bool retryStartupLanHold()
+{
+    // Under the same lock as firewallOn/Off, and only while still wanted: a firewallOn that restored
+    // the LAN permit in the meantime must not have it removed by a late retry.
+    std::lock_guard<std::mutex> guard(g_firewallOnMutex);
+    if (!g_isStartupLanHoldPending) {
+        return true;  // nothing (left) to do
+    }
+    if (FirewallFilter::instance().holdLanPermit()) {
+        g_isStartupLanHoldPending = false;
+        return true;
+    }
+    return false;
+}
+
+void startStartupLanHold()
+{
+    {
+        std::lock_guard<std::mutex> guard(g_firewallOnMutex);
+        g_isStartupLanHoldPending = true;
+    }
+    if (!retryStartupLanHold()) {
+        spdlog::error("Could not hold the firewall's LAN permit; retrying");
+        DnsFirewall::instance().setPendingLanHold(&retryStartupLanHold);
+    }
+}
 
 std::string firewallOn(const std::string &pars)
 {
@@ -376,6 +406,7 @@ std::string firewallOn(const std::string &pars)
     }
     std::lock_guard<std::mutex> guard(g_firewallOnMutex);
     registerBaselineReadyCallback();
+    g_isStartupLanHoldPending = false;
     DnsFirewall::instance().clearPendingLanHold();  // this request rebuilds the firewall
     bool prevStatus = FirewallFilter::instance().currentStatus();
     // The DNS baseline follows the main firewall and goes in first: no program but Windscribe's and
@@ -407,6 +438,7 @@ std::string firewallOff(const std::string &pars)
 
     std::lock_guard<std::mutex> guard(g_firewallOnMutex);
     g_lanHeldRequest.reset();
+    g_isStartupLanHoldPending = false;
     DnsFirewall::instance().clearPendingLanHold();
     bool prevStatus = FirewallFilter::instance().currentStatus();
     FirewallFilter::instance().off();

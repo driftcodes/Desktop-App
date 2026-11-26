@@ -73,10 +73,7 @@ bool Helper::onInit()
         // until the client's next firewallOn.
         if (!DnsFirewall::instance().adoptBaselineAtStart()) {
             spdlog::error("No DNS baseline at service start; holding the firewall's LAN permit");
-            if (!FirewallFilter::instance().holdLanPermit()) {
-                spdlog::error("Could not hold the firewall's LAN permit; retrying");
-                DnsFirewall::instance().setPendingLanHold([]() { return FirewallFilter::instance().holdLanPermit(); });
-            }
+            startStartupLanHold();
         }
     } else {
         DnsFirewall::instance().setBaselineEnabled(false);

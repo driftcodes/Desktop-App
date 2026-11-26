@@ -394,11 +394,14 @@ bool DnsFirewall::adoptBaselineAtStart()
     // sends later. After a reboot they hold no tunnel or custom DNS permit (those are not persistent);
     // after the service alone restarted (e.g. a crash) those can still be there: remove them.
     if (!removeSessionOnlyBaselineFilters()) {
+        // A leftover custom DNS permit can still let every program reach that address (e.g. the
+        // router): not in place until a clean rebuild replaces it. Until then the caller holds the
+        // firewall's LAN permit, and the monitor retries the rebuild.
         spdlog::error("DnsFirewall: could not remove leftover tunnel / custom DNS permits; rebuilding the baseline");
-        isBaselineInPlace_ = true;  // the blocks are there whatever the rebuild does
+        isBaselineInPlace_ = false;
         isBaselineDirty_ = true;
         updateBaselineIfNeeded();
-        return true;
+        return isBaselineInPlace_;
     }
     isBaselineInPlace_ = true;
     baselineTunnels_.clear();

@@ -33,6 +33,7 @@ private slots:
     void testDirectWireGuardOrIkev2AfterProxiedOpenVpn();
     void testIgnoredConnectorRequestIsNotInstalled();
     void testFailedBaselineHoldsConnectionDespiteSessionFilter();
+    void testConnectedRetrySendsConnectedRules();
     void testRetryBacksOffAndStopsOnSuccess();
     void testDnsLeakFilterKeptAfterErrorUntilFirewallOff();
 };

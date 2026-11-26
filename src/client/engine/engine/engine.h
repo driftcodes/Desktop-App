@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <optional>
+#include <functional>
 #include <memory>
 
 #include <QElapsedTimer>
@@ -352,6 +353,8 @@ private slots:
 private:
     void initPart2();
     void updateProxySettings();
+    // The connected state's firewall request (firewall_policy::applyConnectedState).
+    void applyConnectedFirewall();
     // Points the engine's own traffic (API, firewall proxy exception, imported-server probes) at
     // requestProxySettings() when that changed.
     void applyEngineTrafficProxy();
@@ -374,7 +377,9 @@ private:
     firewall_policy::DnsLeakFilterSendResult sendProxiedDnsLeakFilter(firewall_policy::DnsLeakFilter filter);
     // With the firewall on: whether the helper applied it completely, DNS baseline included (resent
     // once if not). Connecting, each attempt and reporting connected wait for it.
-    bool isFirewallDnsProtected();
+    // resend: how to send the firewall again if it is not ready (default: the generic update, right
+    // for the not-connected state).
+    bool isFirewallDnsProtected(const std::function<void()> &resend = {});
     std::unique_ptr<firewall_policy::ProxiedDnsLeakFilter> proxiedDnsLeakFilter_;
 #endif
 

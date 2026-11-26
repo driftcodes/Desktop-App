@@ -23,7 +23,10 @@ public:
     {
         FirewallController::firewallOn(connectingIp, ips, allowLan, isCustom, isVpnConnected, windscribeOnlyIps);
         isOn_ = true;
-        isComplete_ = !failApply;
+        isComplete_ = !failApply && failNextApplies <= 0;
+        if (failNextApplies > 0) {
+            --failNextApplies;
+        }
         ++onCalls;
         lastConnectingIp = connectingIp;
         lastIps = ips;
@@ -41,6 +44,7 @@ public:
     bool isFirewallComplete() const override { return isComplete_; }
 
     bool failApply = false;       // the helper reports the firewall incomplete (e.g. no DNS baseline)
+    int failNextApplies = 0;      // only the next ones
     bool failStateQuery = false;  // the helper's state query fails (reads as off)
     bool isComplete_ = true;
     void setVpnInterface_posix(const QString &) override {}
@@ -1166,6 +1170,33 @@ void TestFirewallPolicy::testFailedBaselineHoldsConnectionDespiteSessionFilter()
         on.firewallOff();
         QVERIFY(ensureFirewallReady(on, resend));
     }
+}
+
+void TestFirewallPolicy::testConnectedRetrySendsConnectedRules()
+{
+    using namespace firewall_policy;
+    FirewallExceptions exceptions = makeExceptions(true);
+    const QSet<QString> connected = exceptions.getIPAddressesForFirewallForConnectedState();
+    // The not-connected request is told apart by its connected flag and its Windscribe-only DNS list
+    // (here the address lists happen to be the same).
+    QVERIFY(!exceptions.getWindscribeOnlyIPAddressesForNotConnectedState(false, true).isEmpty());
+
+    FakeFirewallController controller(true);
+    // The tunnel is up; the connected-state request is not applied completely the first time.
+    controller.failNextApplies = 1;
+    applyConnectedState(controller, exceptions, "203.0.113.5", true, true);
+    QVERIFY(!controller.isFirewallComplete());
+    // The check before reporting connected retries with the same connected-state request (the
+    // engine's resend for that check), which succeeds.
+    const bool isReady = ensureFirewallReady(
+        controller, [&]() { applyConnectedState(controller, exceptions, "203.0.113.5", true, true); });
+    QVERIFY(isReady);
+    QCOMPARE(controller.onCalls, 2);
+    // What reached the helper last: the connected rules, not the not-connected ones.
+    QVERIFY(controller.lastIsVpnConnected);
+    QCOMPARE(controller.lastIps, connected);
+    QCOMPARE(controller.lastConnectingIp, QString("203.0.113.5"));
+    QVERIFY(controller.lastWindscribeOnlyIps.isEmpty());
 }
 
 QTEST_MAIN(TestFirewallPolicy)

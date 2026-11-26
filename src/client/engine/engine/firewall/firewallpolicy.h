@@ -39,6 +39,13 @@ inline bool isFirewallReady(bool isWanted, bool isComplete, bool isActuallyOn)
     return !isWanted || (isComplete && isActuallyOn);
 }
 
+// The connected state's firewall request: the server it connected to, the connected-state exceptions.
+// The engine applies it once the tunnel is up and, if the helper did not apply it completely, sends
+// exactly this again before reporting connected (not the not-connected rules, which the generic
+// update would pick while the connect state still says CONNECTING).
+void applyConnectedState(FirewallController &controller, FirewallExceptions &exceptions, const QString &connectedIp,
+                         bool allowLanTraffic, bool isCustomConfig);
+
 // isFirewallReady for the controller, resending once (resend()) if it is not: what the engine checks
 // before connecting, before each attempt and before reporting connected.
 bool ensureFirewallReady(FirewallController &controller, const std::function<void()> &resend);

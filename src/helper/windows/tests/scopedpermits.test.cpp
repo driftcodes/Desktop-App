@@ -534,6 +534,57 @@ void testMainFirewallCommitNeedsBothDefaultBlocks()
     VERIFY(!(isCommitted && planFirewallApply(true, true, true, true).isComplete));
 }
 
+// Windows' filters by id, with a transaction, as the helper's FirewallFilter uses them.
+struct FakeWfp
+{
+    std::set<uint64_t> installed;
+    std::set<uint64_t> working;
+    uint64_t nextId = 100;
+    void begin() { working = installed; }
+    uint64_t add()
+    {
+        working.insert(nextId);
+        return nextId++;
+    }
+    bool remove(uint64_t id) { return working.erase(id) == 1; }
+    void commit() { installed = working; }
+    void abort() { working = installed; }
+};
+
+void testFailedRebuildKeepsSplitTunnelIds()
+{
+    // Installed: the split-tunnel permits for Throne (app) and its VLESS server (IP).
+    FakeWfp wfp;
+    std::vector<uint64_t> appIds;
+    std::vector<uint64_t> ipIds;
+    wfp.begin();
+    appIds.push_back(wfp.add());
+    ipIds.push_back(wfp.add());
+    wfp.commit();
+
+    // A firewall rebuild: the old filters out, the new in (ids recorded), then it does not commit.
+    {
+        scoped_permits::FilterIdsSnapshot<std::vector<uint64_t>> snapshot({&appIds, &ipIds});
+        wfp.begin();
+        for (const uint64_t id : appIds) wfp.remove(id);
+        for (const uint64_t id : ipIds) wfp.remove(id);
+        appIds = {wfp.add()};
+        ipIds = {wfp.add()};
+        wfp.abort();
+        snapshot.rollback();
+    }
+    VERIFY(wfp.installed.size() == 2);
+
+    // Later the user removes Throne and the VLESS IP from the exclusions: both permits must go.
+    wfp.begin();
+    bool isRemoved = true;
+    for (const uint64_t id : appIds) isRemoved = wfp.remove(id) && isRemoved;
+    for (const uint64_t id : ipIds) isRemoved = wfp.remove(id) && isRemoved;
+    wfp.commit();
+    VERIFY(isRemoved);
+    VERIFY(wfp.installed.empty());
+}
+
 } // namespace
 
 int main()
@@ -554,6 +605,7 @@ int main()
     testStaleReadyCallbackDoesNotRestoreLan();
     testMigrationKeepsOldBlockUntilNewCommitted();
     testMainFirewallCommitNeedsBothDefaultBlocks();
+    testFailedRebuildKeepsSplitTunnelIds();
     if (g_failures == 0) {
         printf("All scoped permit tests passed.\n");
     }

@@ -273,6 +273,32 @@ inline FirewallApplyPlan planFirewallApply(bool hasBegun, bool isV4BlockAdded, b
     return {true, areOtherRulesComplete};
 }
 
+// Filter ids the helper records (to remove those filters later, e.g. the split-tunnel permits for an
+// excluded app or IP), changed inside a WFP transaction: if it does not commit, Windows keeps the old
+// filters, so the old ids must be kept too, or a later removal misses the permit still in force.
+template <typename Ids>
+class FilterIdsSnapshot
+{
+public:
+    explicit FilterIdsSnapshot(std::vector<Ids *> lists)
+        : lists_(std::move(lists))
+    {
+        for (Ids *list : lists_) {
+            saved_.push_back(*list);
+        }
+    }
+    void rollback()
+    {
+        for (size_t i = 0; i < lists_.size(); ++i) {
+            *lists_[i] = saved_[i];
+        }
+    }
+
+private:
+    std::vector<Ids *> lists_;
+    std::vector<Ids> saved_;
+};
+
 // firewallOn with the DNS baseline: the baseline goes in first. Without it in place the main firewall
 // is turned on without its LAN permit (so the LAN DNS path stays closed), the request counts as
 // incomplete for the client, and the LAN permit is added once the baseline is in.
