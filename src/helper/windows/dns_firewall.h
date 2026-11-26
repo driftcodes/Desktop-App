@@ -62,6 +62,10 @@ public:
     // LAN permit.
     bool adoptBaselineAtStart();
     bool isBaselineInPlace();
+    // Service start without a baseline, the firewall's LAN permit could not be removed: the monitor
+    // retries hold() until it succeeds, the baseline gets in, or the client's firewallOn/Off clears it.
+    void setPendingLanHold(std::function<bool()> hold);
+    void clearPendingLanHold();
 
 private:
     std::recursive_mutex mutex_;
@@ -82,6 +86,7 @@ private:
     bool isBaselineInPlace_ = false;           // its blocks are installed
     bool isReadyNotificationPending_ = false;  // got in since the monitor last looked
     std::function<void()> baselineReadyCallback_;
+    std::function<bool()> pendingLanHold_;
     bool isBaselineDirty_ = false;
     bool isWaitingForExcludedApps_ = false;   // adopted at start: keep it until the client's list comes
     bool isExcludedAppsKnown_ = false;
@@ -111,6 +116,9 @@ private:
     // Looks for the baseline's global port-53 blocks among the installed filters.
     void findBaselineBlocks(bool &isV4Found, bool &isV6Found);
     void addTunnelPermitsWhileWaiting();
+    // Removes the baseline's non-persistent filters (tunnel / custom DNS permits) left from before the
+    // service restarted; the persistent block and program permits stay.
+    bool removeSessionOnlyBaselineFilters();
 
     void startMonitor();
     void stopMonitor();

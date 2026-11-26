@@ -82,8 +82,15 @@ Emergency Connect is unchanged and never uses the proxy.
   - After a restart, the baseline's block and the permit for Windscribe and your excluded apps are
     already there when the app starts (they persist, like the firewall's rules); the tunnel and
     custom-DNS permits are set up again when you connect. When the service starts it checks that both
-    global blocks (IPv4 and IPv6) really are installed before relying on them; if not, it builds the
-    baseline, and if that fails it removes the firewall's LAN permit until the app is running. "Already there" means from when Windows
+    global blocks (IPv4 and IPv6) really are installed before relying on them, and removes tunnel or
+    custom-DNS permits left over if only the service restarted (e.g. after a crash). If the blocks
+    are not there it builds the baseline, replacing older rules only in the same step that installs
+    the new ones; if that fails it removes the firewall's LAN permit (retrying until it can) until
+    the app is running.
+  - With the firewall meant to be on (Before Connection, Always On, or After Connection once
+    connected), Windscribe does not report Connected unless the helper confirms the firewall,
+    including both of its block-all rules and the DNS baseline, is completely in place; a firewall
+    rebuild that cannot add a block-all rule keeps the previous rules. "Already there" means from when Windows
     loads persistent firewall rules during startup (the Base Filtering Engine), not from the very
     first moment the network starts; the main firewall works the same way. A test after you sign in,
     before opening Windscribe, covers that state.

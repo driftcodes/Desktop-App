@@ -474,6 +474,66 @@ void testStaleReadyCallbackDoesNotRestoreLan()
     VERIFY(!scoped_permits::shouldRestoreLanPermit(true, false, true));
 }
 
+void testMigrationKeepsOldBlockUntilNewCommitted()
+{
+    using scoped_permits::BaselineAction;
+    using scoped_permits::BaselineRule;
+    using scoped_permits::ReplaceResult;
+    // The first version's rules: per-adapter blocks on Wi-Fi only. The real store removes them in the
+    // same transaction as the new rules go in (its removeAll covers the old sublayer too).
+    const std::vector<BaselineRule> legacy = {
+        BaselineRule{BaselineAction::kBlock, false, kWifi, types::IpAddressRange(), true},
+        BaselineRule{BaselineAction::kBlock, true, kWifi, types::IpAddressRange(), true}};
+    const auto newRules = scoped_permits::dnsBaselineRules({}, {}, 3);
+
+    // The new blocks cannot be added: aborted, the old ones are still there, router DNS blocked.
+    FakeBaselineStore store;
+    store.committed = legacy;
+    store.failAddAt = 0;
+    VERIFY(scoped_permits::replaceDnsRules(store, true, newRules) == ReplaceResult::kKeptPrevious);
+    VERIFY(!scoped_permits::baselineAllows(store.committed, kWifi, ip("192.168.31.1"), false));
+    // Fails at the last block (v6) too.
+    store.addCalls = 0;
+    store.failAddAt = 3;  // v4 block, v4 programs, v4 loopback, v6 block
+    VERIFY(!scoped_permits::isBlockRule(newRules[2]));
+    VERIFY(scoped_permits::isBlockRule(newRules[3]));
+    VERIFY(scoped_permits::replaceDnsRules(store, true, newRules) == ReplaceResult::kKeptPrevious);
+    VERIFY(store.committed.size() == legacy.size());
+    VERIFY(!scoped_permits::baselineAllows(store.committed, kWifi, ip("192.168.31.1"), false));
+
+    // They go in: one commit swaps old for new, so there is no state without a block in between,
+    // and now the second adapter is covered too.
+    store.addCalls = 0;
+    store.failAddAt = -1;
+    VERIFY(scoped_permits::replaceDnsRules(store, true, newRules) == ReplaceResult::kApplied);
+    VERIFY(!scoped_permits::baselineAllows(store.committed, kWifi, ip("192.168.31.1"), false));
+    VERIFY(!scoped_permits::baselineAllows(store.committed, kUsbEthernet, ip("192.168.31.1"), false));
+}
+
+void testMainFirewallCommitNeedsBothDefaultBlocks()
+{
+    using scoped_permits::planFirewallApply;
+    // The IPv4 block-all cannot be added: aborted, the previous rules stay, reported incomplete.
+    auto plan = planFirewallApply(true, false, true, true);
+    VERIFY(!plan.commit);
+    VERIFY(!plan.isComplete);
+    // The IPv6 one.
+    plan = planFirewallApply(true, true, false, true);
+    VERIFY(!plan.commit);
+    VERIFY(!plan.isComplete);
+    // The transaction could not begin.
+    plan = planFirewallApply(false, true, true, true);
+    VERIFY(!plan.commit);
+    // Both in: committed; complete unless a permit was missing (fails closed). A failed commit makes
+    // it incomplete whatever this says (FirewallFilter::on: isCommitted && plan.isComplete).
+    plan = planFirewallApply(true, true, true, true);
+    VERIFY(plan.commit && plan.isComplete);
+    plan = planFirewallApply(true, true, true, false);
+    VERIFY(plan.commit && !plan.isComplete);
+    const bool isCommitted = false;
+    VERIFY(!(isCommitted && planFirewallApply(true, true, true, true).isComplete));
+}
+
 } // namespace
 
 int main()
@@ -492,6 +552,8 @@ int main()
     testFirstBaselineInstallFails();
     testStartupVerifiesSavedBaseline();
     testStaleReadyCallbackDoesNotRestoreLan();
+    testMigrationKeepsOldBlockUntilNewCommitted();
+    testMainFirewallCommitNeedsBothDefaultBlocks();
     if (g_failures == 0) {
         printf("All scoped permit tests passed.\n");
     }

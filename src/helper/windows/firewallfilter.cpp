@@ -23,12 +23,18 @@ void FirewallFilter::release()
 bool FirewallFilter::on(const wchar_t *connectingIp, const std::vector<std::wstring> &ips, const std::vector<std::wstring> &windscribeOnlyIps,
                         bool bAllowLocalTraffic, bool bIsCustomConfig, bool bHoldLanPermit)
 {
-    bool isComplete = false;
     std::lock_guard<std::recursive_mutex> guard(mutex_);
 
     HANDLE hEngine = fwpmWrapper_.getHandleAndLock();
 
-    fwpmWrapper_.beginTransaction();
+    // One transaction: the old rules out and the new in, committed only with both default blocks
+    // added (scoped_permits::planFirewallApply); otherwise aborted, so the rules in place stay.
+    const bool hasBegun = fwpmWrapper_.beginTransaction();
+    if (!hasBegun) {
+        spdlog::error("FirewallFilter::on(), could not begin the transaction; the rules in place stay");
+        fwpmWrapper_.unlock();
+        return false;
+    }
 
     if (currentStatusImpl(hEngine) == true) {
         offImpl(hEngine);
@@ -41,15 +47,30 @@ bool FirewallFilter::on(const wchar_t *connectingIp, const std::vector<std::wstr
     subLayer.flags = FWPM_SUBLAYER_FLAG_PERSISTENT;
     subLayer.weight = 0xFFFF;
 
+    bool areDefaultBlocksAdded[2] = {false, false};
+    bool areOtherRulesComplete = false;
     DWORD dwRet = FwpmSubLayerAdd0(hEngine, &subLayer, NULL );
     if (dwRet == ERROR_SUCCESS) {
-        isComplete = addFilters(hEngine, connectingIp, ips, windscribeOnlyIps, bAllowLocalTraffic, bIsCustomConfig,
-                                bHoldLanPermit);
+        areOtherRulesComplete = addFilters(hEngine, connectingIp, ips, windscribeOnlyIps, bAllowLocalTraffic, bIsCustomConfig,
+                                           bHoldLanPermit, areDefaultBlocksAdded);
     } else {
         spdlog::error("FirewallFilter::on(), FwpmSubLayerAdd0 failed: {}", dwRet);
     }
 
-    fwpmWrapper_.endTransaction();
+    const auto plan = scoped_permits::planFirewallApply(hasBegun, areDefaultBlocksAdded[0], areDefaultBlocksAdded[1],
+                                                         areOtherRulesComplete);
+    bool isComplete = false;
+    if (plan.commit) {
+        const bool isCommitted = fwpmWrapper_.endTransaction();
+        if (!isCommitted) {
+            spdlog::error("FirewallFilter::on(), commit failed; the rules in place stay");
+        }
+        isComplete = isCommitted && plan.isComplete;
+    } else {
+        spdlog::error("FirewallFilter::on(), a default block could not be added (v4 {}, v6 {}); aborted, the rules in place stay",
+                      areDefaultBlocksAdded[0], areDefaultBlocksAdded[1]);
+        fwpmWrapper_.abortTransaction();
+    }
     fwpmWrapper_.unlock();
     return isComplete;
 }
@@ -91,7 +112,8 @@ bool FirewallFilter::holdLanPermit()
             }
             FWPM_FILTER0 **filters = nullptr;
             UINT32 count = 0;
-            while (FwpmFilterEnum0(hEngine, enumHandle, INFINITE, &filters, &count) == ERROR_SUCCESS && count > 0) {
+            DWORD enumRet = ERROR_SUCCESS;
+            while ((enumRet = FwpmFilterEnum0(hEngine, enumHandle, INFINITE, &filters, &count)) == ERROR_SUCCESS && count > 0) {
                 for (UINT32 k = 0; k < count; ++k) {
                     const FWPM_FILTER0 &f = *filters[k];
                     if (f.subLayerKey == subLayerGUID_ && f.action.type == FWP_ACTION_PERMIT &&
@@ -100,6 +122,11 @@ bool FirewallFilter::holdLanPermit()
                     }
                 }
                 FwpmFreeMemory0((void **)&filters);
+            }
+            if (enumRet != ERROR_SUCCESS) {
+                // Not the end of the list: an error, so a LAN permit may have been missed.
+                spdlog::error("FirewallFilter::holdLanPermit(), FwpmFilterEnum0 failed: {}", enumRet);
+                isHeld = false;
             }
             FwpmFilterDestroyEnumHandle0(hEngine, enumHandle);
         }
@@ -268,7 +295,7 @@ void FirewallFilter::setSplitTunnelingWhitelistIps(const std::vector<types::IpAd
 
 bool FirewallFilter::addFilters(HANDLE engineHandle, const wchar_t *connectingIp, const std::vector<std::wstring> &ips,
                                 const std::vector<std::wstring> &windscribeOnlyIps, bool bAllowLocalTraffic, bool bIsCustomConfig,
-                                bool bHoldLanPermit)
+                                bool bHoldLanPermit, bool areDefaultBlocksAdded[2])
 {
     // false when a permit the caller asked for is missing (the firewall is still on, blocking more).
     bool isComplete = true;
@@ -277,11 +304,13 @@ bool FirewallFilter::addFilters(HANDLE engineHandle, const wchar_t *connectingIp
 
     // add block filter for all IPs, for all adapters, IPv4.
     bool ret = Utils::addFilterV4(engineHandle, nullptr, FWP_ACTION_BLOCK, 0, subLayerGUID_, FIREWALL_SUBLAYER_NAMEW);
+    areDefaultBlocksAdded[0] = ret;
     if (!ret) {
         spdlog::error("Could not add IPv4 block filter");
     }
     // add block filter for all IPs, for all adapters, IPv6.
     ret = Utils::addFilterV6(engineHandle, nullptr, FWP_ACTION_BLOCK, 0, subLayerGUID_, FIREWALL_SUBLAYER_NAMEW);
+    areDefaultBlocksAdded[1] = ret;
     if (!ret) {
         spdlog::error("Could not add IPv6 block filter");
     }

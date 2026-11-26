@@ -1567,7 +1567,7 @@ void Engine::onConnectionManagerConnected()
     // A proxied session is reported connected only with the connected DNS rules confirmed: until then
     // the not-connected ones are in place, which let Windscribe and excluded apps (Throne) reach the
     // adapters' DNS servers.
-    if ((proxiedDnsLeakFilter_ && !proxiedDnsLeakFilter_->mayReportConnected()) || !isFirewallDnsProtected()) {
+    if (proxiedDnsLeakFilter_ && !proxiedDnsLeakFilter_->mayReportConnected()) {
         qCCritical(LOG_CONNECTION) << "The connected DNS leak rules could not be installed; disconnecting";
         pendingDisconnectError_ = ConnectError::kDnsLeakProtectionFailed;
         connectionManager_->clickDisconnect(DISCONNECTED_WITH_ERROR);
@@ -1729,6 +1729,16 @@ void Engine::onConnectionManagerConnected()
     }
 #endif
 
+#ifdef Q_OS_WIN
+    // After every firewall change above (Automatic / After Connection turns it on only now): a firewall
+    // that should be on must be completely applied, DNS baseline included, before this is published.
+    if (!isFirewallDnsProtected()) {
+        qCCritical(LOG_CONNECTION) << "The firewall could not be applied completely; disconnecting";
+        pendingDisconnectError_ = ConnectError::kDnsLeakProtectionFailed;
+        connectionManager_->clickDisconnect(DISCONNECTED_WITH_ERROR);
+        return;
+    }
+#endif
     connectStateController_->setConnectedState(locationId_);
     // If IP is pinned for this location, skip tunnel tests; it will be done once the IP is pinned in onConnectedStateChanged()
     if (pinnedNode_.second.isEmpty()) {
@@ -3316,18 +3326,14 @@ void Engine::updateProxiedDnsLeakProtection(CONNECT_STATE state, DISCONNECT_REAS
 
 bool Engine::isFirewallDnsProtected()
 {
-    if (!firewallController_ || !firewallController_->firewallActualState()) {
+    if (!firewallController_) {
         return true;
     }
-    if (!firewallController_->isFirewallComplete()) {
-        // Not committed while incomplete: this sends it again.
-        updateFirewallSettings();
+    const bool isReady = firewall_policy::ensureFirewallReady(*firewallController_, [this]() { updateFirewallSettings(true); });
+    if (!isReady) {
+        qCCritical(LOG_BASIC) << "The firewall should be on but is not completely applied (DNS baseline); holding the connection";
     }
-    const bool isProtected = firewall_policy::mayProceedWithFirewall(true, firewallController_->isFirewallComplete());
-    if (!isProtected) {
-        qCCritical(LOG_BASIC) << "The firewall is on but not completely applied (DNS baseline); holding the connection";
-    }
-    return isProtected;
+    return isReady;
 }
 
 firewall_policy::DnsLeakFilterSendResult Engine::sendProxiedDnsLeakFilter(firewall_policy::DnsLeakFilter filter)

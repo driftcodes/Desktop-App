@@ -116,8 +116,11 @@ private:
 class WfpBaselineRuleStore : public scoped_permits::RuleStore<scoped_permits::BaselineRule>
 {
 public:
-    WfpBaselineRuleStore(FwpmWrapper &wrapper, HANDLE engine, const GUID &subLayer, AppsIds &permittedApps)
-        : wrapper_(wrapper), engine_(engine), subLayer_(subLayer), permittedApps_(permittedApps) {}
+    // legacySubLayer: the first version's sublayer, removed in the same transaction as the new rules
+    // go in (so its protection lasts until they are committed).
+    WfpBaselineRuleStore(FwpmWrapper &wrapper, HANDLE engine, const GUID &subLayer, AppsIds &permittedApps,
+                         const GUID *legacySubLayer = nullptr)
+        : wrapper_(wrapper), engine_(engine), subLayer_(subLayer), permittedApps_(permittedApps), legacySubLayer_(legacySubLayer) {}
 
     bool begin() override { return wrapper_.beginTransaction(); }
 
@@ -128,6 +131,16 @@ public:
                                FWPM_LAYER_ALE_AUTH_CONNECT_V6, FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6};
         for (const GUID &layer : layers) {
             Utils::deleteAllFiltersForSublayer(engine_, &subLayer_, layer, &allDeleted);
+            if (legacySubLayer_ != nullptr) {
+                Utils::deleteAllFiltersForSublayer(engine_, legacySubLayer_, layer, &allDeleted);
+            }
+        }
+        if (allDeleted && legacySubLayer_ != nullptr) {
+            const DWORD ret = FwpmSubLayerDeleteByKey0(engine_, legacySubLayer_);
+            if (ret != ERROR_SUCCESS && ret != FWP_E_SUBLAYER_NOT_FOUND) {
+                spdlog::error("DnsFirewall: removing the first version's DNS baseline sublayer failed: {}", ret);
+                allDeleted = false;
+            }
         }
         return allDeleted;
     }
@@ -182,6 +195,7 @@ private:
     HANDLE engine_;
     GUID subLayer_;
     AppsIds &permittedApps_;
+    const GUID *legacySubLayer_;
 };
 
 } // namespace
@@ -363,9 +377,7 @@ bool DnsFirewall::adoptBaselineAtStart()
     std::lock_guard<std::recursive_mutex> guard(mutex_);
     isBaselineEnabled_ = true;
     startMonitor();
-    if (!removeSublayerWithFilters(legacyBaselineSubLayerGUID_)) {
-        spdlog::error("DnsFirewall: could not remove the first version's DNS baseline");
-    }
+    // The first version's rules (if any) stay until a rebuild replaces them in one transaction.
     bool isV4Verified = false;
     bool isV6Verified = false;
     findBaselineBlocks(isV4Verified, isV6Verified);
@@ -379,7 +391,15 @@ bool DnsFirewall::adoptBaselineAtStart()
     }
     // The persistent rules from before block DNS on every adapter (including any added while Windows
     // was off) and, unlike a rebuild now, already permit the excluded apps, which the client only
-    // sends later. They hold no tunnel or custom DNS permit (those are not persistent).
+    // sends later. After a reboot they hold no tunnel or custom DNS permit (those are not persistent);
+    // after the service alone restarted (e.g. a crash) those can still be there: remove them.
+    if (!removeSessionOnlyBaselineFilters()) {
+        spdlog::error("DnsFirewall: could not remove leftover tunnel / custom DNS permits; rebuilding the baseline");
+        isBaselineInPlace_ = true;  // the blocks are there whatever the rebuild does
+        isBaselineDirty_ = true;
+        updateBaselineIfNeeded();
+        return true;
+    }
     isBaselineInPlace_ = true;
     baselineTunnels_.clear();
     baselineAddresses_.clear();
@@ -471,7 +491,7 @@ void DnsFirewall::applyBaselineImpl()
     const auto rules = scoped_permits::dnsBaselineRules(tunnels, addresses, permittedApps.count());
 
     HANDLE hEngine = fwmpWrapper_.getHandleAndLock();
-    WfpBaselineRuleStore store(fwmpWrapper_, hEngine, baselineSubLayerGUID_, permittedApps);
+    WfpBaselineRuleStore store(fwmpWrapper_, hEngine, baselineSubLayerGUID_, permittedApps, &legacyBaselineSubLayerGUID_);
     const auto result = scoped_permits::replaceDnsRules(store, true, rules);
     fwmpWrapper_.unlock();
 
@@ -567,6 +587,72 @@ void DnsFirewall::findBaselineBlocks(bool &isV4Found, bool &isV6Found)
         FwpmFilterDestroyEnumHandle0(hEngine, enumHandle);
     }
     fwmpWrapper_.unlock();
+}
+
+bool DnsFirewall::removeSessionOnlyBaselineFilters()
+{
+    HANDLE hEngine = fwmpWrapper_.getHandleAndLock();
+    bool isDone = fwmpWrapper_.beginTransaction();
+    size_t removed = 0;
+    if (isDone) {
+        const GUID layers[] = {FWPM_LAYER_ALE_AUTH_CONNECT_V4, FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4,
+                               FWPM_LAYER_ALE_AUTH_CONNECT_V6, FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6};
+        std::vector<UINT64> ids;
+        for (const GUID &layer : layers) {
+            FWPM_FILTER_ENUM_TEMPLATE0 enumTemplate;
+            ZeroMemory(&enumTemplate, sizeof(enumTemplate));
+            enumTemplate.layerKey = layer;
+            enumTemplate.actionMask = 0xFFFFFFFF;
+            HANDLE enumHandle = NULL;
+            if (FwpmFilterCreateEnumHandle0(hEngine, &enumTemplate, &enumHandle) != ERROR_SUCCESS) {
+                isDone = false;
+                continue;
+            }
+            FWPM_FILTER0 **filters = nullptr;
+            UINT32 count = 0;
+            DWORD enumRet = ERROR_SUCCESS;
+            while ((enumRet = FwpmFilterEnum0(hEngine, enumHandle, INFINITE, &filters, &count)) == ERROR_SUCCESS && count > 0) {
+                for (UINT32 k = 0; k < count; ++k) {
+                    const FWPM_FILTER0 &f = *filters[k];
+                    if (f.subLayerKey == baselineSubLayerGUID_ && (f.flags & FWPM_FILTER_FLAG_PERSISTENT) == 0) {
+                        ids.push_back(f.filterId);
+                    }
+                }
+                FwpmFreeMemory0((void **)&filters);
+            }
+            if (enumRet != ERROR_SUCCESS) {
+                isDone = false;
+            }
+            FwpmFilterDestroyEnumHandle0(hEngine, enumHandle);
+        }
+        for (const UINT64 id : ids) {
+            if (FwpmFilterDeleteById0(hEngine, id) != ERROR_SUCCESS) {
+                isDone = false;
+            }
+        }
+        removed = ids.size();
+        if (isDone) {
+            isDone = fwmpWrapper_.endTransaction();
+        } else {
+            fwmpWrapper_.abortTransaction();
+        }
+    }
+    fwmpWrapper_.unlock();
+    spdlog::info("DnsFirewall: {} leftover non-persistent baseline filter(s), removed: {}", removed, isDone);
+    return isDone;
+}
+
+void DnsFirewall::setPendingLanHold(std::function<bool()> hold)
+{
+    std::lock_guard<std::recursive_mutex> guard(mutex_);
+    pendingLanHold_ = std::move(hold);
+    startMonitor();
+}
+
+void DnsFirewall::clearPendingLanHold()
+{
+    std::lock_guard<std::recursive_mutex> guard(mutex_);
+    pendingLanHold_ = nullptr;
 }
 
 bool DnsFirewall::removeSublayerWithFilters(const GUID &subLayer)
@@ -677,6 +763,7 @@ void DnsFirewall::monitorThread()
 void DnsFirewall::checkForChanges()
 {
     std::function<void()> callback;
+    std::function<bool()> hold;
     {
     std::lock_guard<std::recursive_mutex> guard(mutex_);
     if (requests_.isWanted()) {
@@ -702,10 +789,19 @@ void DnsFirewall::checkForChanges()
         removeBaselineImpl();
     }
     callback = hasBecomeReady ? baselineReadyCallback_ : std::function<void()>();
+    if (pendingLanHold_ && isBaselineEnabled_ && isBaselineInPlace_) {
+        pendingLanHold_ = nullptr;  // the baseline covers it now
     }
-    // Outside the lock: the callback turns the main firewall's LAN permit back on.
+    hold = pendingLanHold_;
+    }
+    // Outside the lock: the callback turns the main firewall's LAN permit back on; the hold retries
+    // removing it (service start, no baseline, an earlier attempt failed).
     if (callback) {
         callback();
+    }
+    if (hold && hold()) {
+        std::lock_guard<std::recursive_mutex> guard(mutex_);
+        pendingLanHold_ = nullptr;
     }
 }
 

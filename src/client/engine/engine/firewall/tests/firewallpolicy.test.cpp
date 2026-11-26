@@ -18,10 +18,12 @@ class FakeFirewallController : public FirewallController
 public:
     explicit FakeFirewallController(bool isOn) : FirewallController(nullptr), isOn_(isOn) {}
 
-    void firewallOn(const QString &connectingIp, const QSet<QString> &ips, bool, bool, bool isVpnConnected,
+    void firewallOn(const QString &connectingIp, const QSet<QString> &ips, bool allowLan, bool isCustom, bool isVpnConnected,
                     const QSet<QString> &windscribeOnlyIps) override
     {
+        FirewallController::firewallOn(connectingIp, ips, allowLan, isCustom, isVpnConnected, windscribeOnlyIps);
         isOn_ = true;
+        isComplete_ = !failApply;
         ++onCalls;
         lastConnectingIp = connectingIp;
         lastIps = ips;
@@ -30,10 +32,17 @@ public:
     }
     void firewallOff() override
     {
+        FirewallController::firewallOff();
         isOn_ = false;
+        isComplete_ = true;
         ++offCalls;
     }
-    bool firewallActualState() override { return isOn_; }
+    bool firewallActualState() override { return !failStateQuery && isOn_; }
+    bool isFirewallComplete() const override { return isComplete_; }
+
+    bool failApply = false;       // the helper reports the firewall incomplete (e.g. no DNS baseline)
+    bool failStateQuery = false;  // the helper's state query fails (reads as off)
+    bool isComplete_ = true;
     void setVpnInterface_posix(const QString &) override {}
     void setFirewallOnBoot(bool, const QSet<QString> &, bool) override {}
 
@@ -1107,23 +1116,56 @@ void TestFirewallPolicy::testIgnoredConnectorRequestIsNotInstalled()
 void TestFirewallPolicy::testFailedBaselineHoldsConnectionDespiteSessionFilter()
 {
     using namespace firewall_policy;
-    // The session DNS leak filter goes in fine ...
-    FakeDnsLeakFilterHelper helper;
-    auto filter = helper.makeController();
-    filter.onConnectRequest(true, false);
-    filter.onConnectState(CONNECT_STATE_CONNECTING, true, false);
-    QVERIFY(filter.mayConnect(true));
-    QVERIFY(filter.mayStartAttempt(true));
-    // ... but the helper reported the firewall incomplete (no DNS baseline): no connection, no
-    // attempt, and a tunnel that comes up is not reported connected.
-    const bool isFirewallOn = true;
-    const bool isFirewallComplete = false;
-    QVERIFY(!(filter.mayConnect(true) && mayProceedWithFirewall(isFirewallOn, isFirewallComplete)));
-    QVERIFY(!(filter.mayStartAttempt(true) && mayProceedWithFirewall(isFirewallOn, isFirewallComplete)));
-    QVERIFY(!(filter.mayReportConnected() && mayProceedWithFirewall(isFirewallOn, isFirewallComplete)));
-    // Complete, or the firewall off (nothing to require): it may.
-    QVERIFY(mayProceedWithFirewall(true, true));
-    QVERIFY(mayProceedWithFirewall(false, false));
+    int resends = 0;
+    const auto resend = [&resends]() { ++resends; };
+
+    // Automatic / Before Connection: the firewall is turned on before connecting and the helper
+    // reports it incomplete (no DNS baseline). The session DNS leak filter goes in fine, but the
+    // engine does not connect, nor start an attempt.
+    {
+        FakeFirewallController controller(false);
+        controller.failApply = true;
+        controller.firewallOn("", {}, true, true, false, {});
+        FakeDnsLeakFilterHelper helper;
+        auto filter = helper.makeController();
+        filter.onConnectRequest(true, false);
+        filter.onConnectState(CONNECT_STATE_CONNECTING, true, false);
+        QVERIFY(filter.mayConnect(true));
+        QVERIFY(!ensureFirewallReady(controller, resend));
+        QVERIFY(filter.mayStartAttempt(true));
+        QVERIFY(!ensureFirewallReady(controller, resend));
+        QVERIFY(resends > 0);
+    }
+    // Automatic / After Connection: off while connecting (nothing to hold), turned on once the tunnel
+    // is up; that activation fails. Checked after it, in the engine's order, it is not reported
+    // connected. (Checked before it, as the engine used to, it would have passed.)
+    {
+        FakeFirewallController controller(false);
+        controller.failApply = true;
+        QVERIFY(ensureFirewallReady(controller, resend));  // intentionally off while connecting
+        const auto action = afterConnected(FIREWALL_MODE_AUTOMATIC, FIREWALL_WHEN_AFTER_CONNECTION,
+                                           controller.firewallActualState(), true);
+        QCOMPARE(action, AutomaticAction::TurnOn);
+        controller.firewallOn("", {}, true, true, true, {});
+        QVERIFY(!ensureFirewallReady(controller, resend));
+    }
+    // The helper's state query fails: wanted on but unknown is not ready (not taken as "off").
+    {
+        FakeFirewallController controller(false);
+        controller.firewallOn("", {}, true, true, false, {});
+        controller.failStateQuery = true;
+        QVERIFY(!ensureFirewallReady(controller, resend));
+    }
+    // Complete and on, or meant to be off: ready.
+    {
+        FakeFirewallController on(false);
+        on.firewallOn("", {}, true, true, false, {});
+        QVERIFY(ensureFirewallReady(on, resend));
+        FakeFirewallController off(false);
+        QVERIFY(ensureFirewallReady(off, resend));
+        on.firewallOff();
+        QVERIFY(ensureFirewallReady(on, resend));
+    }
 }
 
 QTEST_MAIN(TestFirewallPolicy)

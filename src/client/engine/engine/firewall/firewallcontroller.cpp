@@ -9,6 +9,7 @@ FirewallController::FirewallController(QObject *parent) : QObject(parent),
 void FirewallController::firewallOn(const QString &connectingIp, const QSet<QString> &ips, bool bAllowLanTraffic, bool bIsCustomConfig, bool isVpnConnected,
                                     const QSet<QString> &windscribeOnlyIps)
 {
+    isWanted_ = true;
     if (!bInitialized_) {
         bStateChanged_ = true;
     } else {
@@ -37,6 +38,7 @@ void FirewallController::commitFirewallOn(const QString &connectingIp, const QSe
 
 void FirewallController::firewallOff()
 {
+    isWanted_ = false;
     if (!bInitialized_) {
         bStateChanged_ = true;
     } else {

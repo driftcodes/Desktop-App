@@ -61,7 +61,7 @@ private:
 
     bool addFilters(HANDLE engineHandle, const wchar_t *connectingIp, const std::vector<std::wstring> &ips,
                     const std::vector<std::wstring> &windscribeOnlyIps, bool bAllowLocalTraffic, bool bIsCustomConfig,
-                    bool bHoldLanPermit);
+                    bool bHoldLanPermit, bool areDefaultBlocksAdded[2]);
     void addPermitFilterForVpnAndSystemServices(HANDLE engineHandle, const wchar_t *ip);
     bool addLinkLocalDnsBlock(HANDLE engineHandle);
     void addPermitFilterForAppsIds(HANDLE engineHandle);

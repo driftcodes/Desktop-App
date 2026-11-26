@@ -26,6 +26,9 @@ public:
     // Whether the helper applied the last firewallOn completely (Windows: including the DNS baseline
     // that keeps DNS off the LAN). An incomplete one is not committed, so the next update resends it.
     virtual bool isFirewallComplete() const { return true; }
+    // Whether the firewall was last asked to be on (by firewallOn) rather than off: tells a firewall
+    // that is intentionally off from one that should be on but is not (or whose state is unknown).
+    bool isFirewallWanted() const { return isWanted_; }
 
     virtual bool whitelistPorts(const api_responses::StaticIpPortsVector &ports);
     virtual bool deleteWhitelistPorts();
@@ -55,4 +58,5 @@ protected:
     api_responses::StaticIpPortsVector latestStaticIpPorts_;
     bool bInitialized_;
     bool bStateChanged_;
+    bool isWanted_ = false;
 };

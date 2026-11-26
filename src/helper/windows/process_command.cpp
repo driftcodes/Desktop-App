@@ -376,6 +376,7 @@ std::string firewallOn(const std::string &pars)
     }
     std::lock_guard<std::mutex> guard(g_firewallOnMutex);
     registerBaselineReadyCallback();
+    DnsFirewall::instance().clearPendingLanHold();  // this request rebuilds the firewall
     bool prevStatus = FirewallFilter::instance().currentStatus();
     // The DNS baseline follows the main firewall and goes in first: no program but Windscribe's and
     // excluded apps sends DNS outside the tunnel while it is on, whatever the LAN permit allows.
@@ -406,6 +407,7 @@ std::string firewallOff(const std::string &pars)
 
     std::lock_guard<std::mutex> guard(g_firewallOnMutex);
     g_lanHeldRequest.reset();
+    DnsFirewall::instance().clearPendingLanHold();
     bool prevStatus = FirewallFilter::instance().currentStatus();
     FirewallFilter::instance().off();
     DnsFirewall::instance().setBaselineEnabled(false);

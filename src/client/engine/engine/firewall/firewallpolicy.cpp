@@ -19,6 +19,20 @@ AutomaticAction afterConnected(FIREWALL_MODE mode, FIREWALL_WHEN when, bool isFi
     return AutomaticAction::None;
 }
 
+bool ensureFirewallReady(FirewallController &controller, const std::function<void()> &resend)
+{
+    if (!controller.isFirewallWanted()) {
+        return true;  // meant to be off
+    }
+    if (isFirewallReady(true, controller.isFirewallComplete(), controller.firewallActualState())) {
+        return true;
+    }
+    // Wanted on but incomplete, off, or its state unknown: send it again (an incomplete one is not
+    // committed) and look once more.
+    resend();
+    return isFirewallReady(true, controller.isFirewallComplete(), controller.firewallActualState());
+}
+
 void leaveConnection(FirewallController &controller, FirewallExceptions &exceptions,
                      const std::function<QSet<QString>()> &notConnectedIps,
                      const std::function<QSet<QString>()> &windscribeOnlyIps, bool allowLanTraffic, bool isCustomConfig)

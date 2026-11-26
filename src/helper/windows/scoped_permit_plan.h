@@ -255,6 +255,24 @@ inline bool shouldRestoreLanPermit(bool isRequestHeld, bool isFirewallOn, bool i
     return isRequestHeld && isFirewallOn && isBaselineInPlaceNow;
 }
 
+// The main firewall's own rebuild (FirewallFilter::on): one transaction, committed only with both
+// default blocks (IPv4 and IPv6 block-all) added; otherwise aborted, so the rules in place before
+// stay. Missing permits (fail closed) commit but count as incomplete.
+struct FirewallApplyPlan
+{
+    bool commit;
+    bool isComplete;  // before the commit's own result
+};
+
+inline FirewallApplyPlan planFirewallApply(bool hasBegun, bool isV4BlockAdded, bool isV6BlockAdded,
+                                           bool areOtherRulesComplete)
+{
+    if (!hasBegun || !isV4BlockAdded || !isV6BlockAdded) {
+        return {false, false};
+    }
+    return {true, areOtherRulesComplete};
+}
+
 // firewallOn with the DNS baseline: the baseline goes in first. Without it in place the main firewall
 // is turned on without its LAN permit (so the LAN DNS path stays closed), the request counts as
 // incomplete for the client, and the LAN permit is added once the baseline is in.

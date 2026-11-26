@@ -29,14 +29,19 @@ void leaveConnection(FirewallController &controller, FirewallExceptions &excepti
                      const std::function<QSet<QString>()> &notConnectedIps,
                      const std::function<QSet<QString>()> &windscribeOnlyIps, bool allowLanTraffic, bool isCustomConfig);
 
-// With the firewall on, a connection (and each attempt, and reporting it connected) needs the
-// firewall applied completely: on Windows that includes the DNS baseline, without which the helper
-// holds the LAN permit back and reports it incomplete. The session DNS leak filter being in place
-// does not make up for it.
-inline bool mayProceedWithFirewall(bool isFirewallOn, bool isFirewallComplete)
+// With the firewall wanted on, a connection (and each attempt, and reporting it connected) needs it
+// applied completely and actually on: on Windows that includes the DNS baseline, without which the
+// helper holds the LAN permit back and reports it incomplete; a failed state query counts as not on.
+// The session DNS leak filter being in place does not make up for it. A firewall that is meant to
+// be off (Automatic before it turns on) does not hold anything.
+inline bool isFirewallReady(bool isWanted, bool isComplete, bool isActuallyOn)
 {
-    return !isFirewallOn || isFirewallComplete;
+    return !isWanted || (isComplete && isActuallyOn);
 }
+
+// isFirewallReady for the controller, resending once (resend()) if it is not: what the engine checks
+// before connecting, before each attempt and before reporting connected.
+bool ensureFirewallReady(FirewallController &controller, const std::function<void()> &resend);
 
 // Windows DNS leak filter (port 53 to the physical adapters' DNS servers) for a session started with a
 // proxy set. It is on from the first CONNECTING to the final DISCONNECTED, reconnects and the gaps
