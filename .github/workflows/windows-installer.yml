@@ -7,19 +7,17 @@
 #             certificate must be trusted on the PC you install on.
 #   dev-mode  Unsigned build with signature/path checks turned off (build_all --dev-mode). For testing
 #             only: any program on the PC could then drive the privileged helper service.
-#   auto      signed when the secrets exist, otherwise dev-mode. Pushes always use auto.
+#   auto      signed when the secrets exist, otherwise dev-mode.
 #
 # The first run builds Qt, OpenSSL, Boost and the rest from source through vcpkg (a few hours).
 # The compiled packages are cached, so later runs only rebuild the app.
 
 name: Build Windows installer
 
+# Started by hand only (Actions > Build Windows installer > Run workflow): a build takes about 45
+# minutes of Windows runner time, so it does not run on every push. GitHub disables workflows on
+# forks that use a lot of compute; this keeps it to the builds you actually want.
 on:
-  push:
-    branches:
-      - claude/adoring-fermi-qyxwb9
-    paths-ignore:
-      - '**.md'
   workflow_dispatch:
     inputs:
       signing:

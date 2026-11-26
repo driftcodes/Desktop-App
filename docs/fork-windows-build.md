@@ -231,9 +231,12 @@ Your router's web page, printers and file shares should keep working throughout.
 
 ## Building with GitHub Actions
 
-1. In your fork on GitHub, open **Actions** and enable workflows (forks start with them disabled).
-2. The workflow **Build Windows installer** runs on every push to `claude/adoring-fermi-qyxwb9`, or
-   manually: Actions > Build Windows installer > Run workflow.
+1. In your fork on GitHub, open **Settings > Actions > General** and allow actions (forks start with
+   them disabled, and GitHub may disable them again on a fork that uses a lot of compute). This fork
+   has only this one workflow.
+2. The workflow **Build Windows installer** runs only when you start it: Actions > Build Windows
+   installer > Run workflow, branch `claude/adoring-fermi-qyxwb9`. Pushes do not start it, so start
+   it after the changes you want are in (each run is about 45 minutes of Windows runner time).
 3. The first run takes a few hours: vcpkg builds Qt, OpenSSL, Boost and the rest from source. Those
    are cached, so later runs take much less. If the first run hits the time limit, run it again; it
    continues from the cache.
