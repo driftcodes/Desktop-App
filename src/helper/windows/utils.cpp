@@ -1015,6 +1015,7 @@ void disableFirewall()
         if (fwpmWrapper.initialize()) {
             Ipv6Firewall::instance(&fwpmWrapper).enableIPv6();
             DnsFirewall::instance(&fwpmWrapper).disable(DnsLeakFilterOwner::kAny);
+            DnsFirewall::instance(&fwpmWrapper).setBaselineEnabled(false);
             FirewallFilter::instance(&fwpmWrapper).off();
             SplitTunneling::removeAllFilters(fwpmWrapper);
             printf(WS_PRODUCT_NAME " firewall deleted.\n");

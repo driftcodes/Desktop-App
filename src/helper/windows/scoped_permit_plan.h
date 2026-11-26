@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <set>
 #include <string>
 #include <vector>
@@ -101,6 +102,54 @@ inline std::vector<DnsRule> dnsFilterRules(const std::set<types::IpAddress> &ser
     return rules;
 }
 
+// The DNS baseline: whenever the main firewall is on (connected, reconnecting, disconnected with
+// Always On, and from boot, being persistent like the firewall's rules), port 53 over the physical
+// adapters is blocked for every program and every address, listed as a DNS server or not. The
+// firewall's LAN permit (Allow LAN, and always for imported profiles) would otherwise let any
+// program query a router directly, also one no adapter lists any more (e.g. after switching the
+// Wi-Fi's DNS to a public one). Scoped to the physical adapters, it leaves DNS through the VPN
+// adapter alone. Windscribe's programs and Exclusive-mode excluded apps are permitted; while
+// connected, so are the custom connected DNS addresses (they may be on the LAN).
+enum class BaselineAction {
+    kBlock,          // port 53 on this adapter, every program, every address
+    kPermitApps,     // the same for Windscribe's programs and excluded apps
+    kPermitAddress   // port 53 to this address on this adapter, every program
+};
+
+struct BaselineRule
+{
+    uint64_t interfaceLuid;
+    bool isV6;
+    BaselineAction action;
+    types::IpAddress address;  // kPermitAddress only
+};
+
+inline bool isBlockRule(const BaselineRule &rule)
+{
+    return rule.action == BaselineAction::kBlock;
+}
+
+inline std::vector<BaselineRule> dnsBaselineRules(const std::set<uint64_t> &physicalInterfaces,
+                                                  const std::set<types::IpAddress> &permittedAddresses,
+                                                  size_t permittedAppsCount)
+{
+    std::vector<BaselineRule> rules;
+    for (const uint64_t luid : physicalInterfaces) {
+        for (const bool isV6 : {false, true}) {
+            rules.push_back(BaselineRule{luid, isV6, BaselineAction::kBlock, types::IpAddress()});
+            if (permittedAppsCount > 0) {
+                rules.push_back(BaselineRule{luid, isV6, BaselineAction::kPermitApps, types::IpAddress()});
+            }
+            for (const auto &addr : permittedAddresses) {
+                if (addr.isValid() && addr.isV6() == isV6) {
+                    rules.push_back(BaselineRule{luid, isV6, BaselineAction::kPermitAddress, addr});
+                }
+            }
+        }
+    }
+    return rules;
+}
+
 struct DnsRulePlan
 {
     bool canApply;    // false: keep the rules in place
@@ -125,17 +174,24 @@ inline DnsRulePlan planDnsRules(bool serversKnown, const std::set<types::IpAddre
 }
 
 // The WFP operations replaceDnsRules needs; DnsFirewall implements it with one transaction.
-class DnsRuleStore
+template <typename Rule>
+class RuleStore
 {
 public:
-    virtual ~DnsRuleStore() = default;
+    virtual ~RuleStore() = default;
     virtual bool begin() = 0;
     virtual bool removeAll() = 0;    // every rule of the sublayer, inside the transaction
     virtual bool ensureSublayer() = 0;
-    virtual bool add(const DnsRule &rule) = 0;
+    virtual bool add(const Rule &rule) = 0;
     virtual bool commit() = 0;
     virtual void abort() = 0;
 };
+using DnsRuleStore = RuleStore<DnsRule>;
+
+inline bool isBlockRule(const DnsRule &rule)
+{
+    return !rule.isPermitForApps;
+}
 
 enum class ReplaceResult {
     kApplied,
@@ -146,7 +202,8 @@ enum class ReplaceResult {
 // Replaces the rules in one transaction. The old rules are removed only if every new block can be
 // added and the transaction commits; otherwise it is aborted and the old rules stay. canApply is
 // false when there is nothing reliable to apply (see planDnsRules).
-inline ReplaceResult replaceDnsRules(DnsRuleStore &store, bool canApply, const std::vector<DnsRule> &rules)
+template <typename Rule>
+inline ReplaceResult replaceDnsRules(RuleStore<Rule> &store, bool canApply, const std::vector<Rule> &rules)
 {
     if (!canApply || !store.begin()) {
         return ReplaceResult::kKeptPrevious;
@@ -158,7 +215,7 @@ inline ReplaceResult replaceDnsRules(DnsRuleStore &store, bool canApply, const s
     bool isEveryPermitAdded = true;
     for (const auto &rule : rules) {
         if (!store.add(rule)) {
-            if (!rule.isPermitForApps) {
+            if (isBlockRule(rule)) {
                 store.abort();
                 return ReplaceResult::kKeptPrevious;
             }

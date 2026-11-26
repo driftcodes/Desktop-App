@@ -45,6 +45,15 @@ public:
     void setWindscribeAppsIds(const AppsIds &appsIds);
     void setExcludedAppsIds(const AppsIds &appsIds);
 
+    // The DNS baseline (see scoped_permits::dnsBaselineRules): on with the main firewall, off with
+    // it. Persistent, like the firewall's rules, so it is in place from boot with Always On. While
+    // on, the monitor rebuilds it when the physical adapters change.
+    void setBaselineEnabled(bool isEnabled);
+    // Service start with the firewall kept from before (firewall on boot): keep the baseline left
+    // in place (it already permits the excluded apps, which the client only sends later) and rebuild
+    // it once the client has sent them, or when the adapters change. One is built if none is there.
+    void adoptBaselineAtStart();
+
 private:
     std::recursive_mutex mutex_;
     scoped_permits::DnsFilterRequests requests_;  // owner, and what it wants
@@ -57,6 +66,16 @@ private:
     GUID subLayerGUID_;
     FwpmWrapper &fwmpWrapper_;
 
+    // The baseline.
+    GUID baselineSubLayerGUID_;
+    bool isBaselineEnabled_ = false;
+    bool isBaselineDirty_ = false;
+    bool isWaitingForExcludedApps_ = false;   // adopted at start: keep it until the client's list comes
+    bool isExcludedAppsKnown_ = false;
+    std::set<uint64_t> baselineInterfaces_;           // the physical adapters it covers
+    std::set<types::IpAddress> baselineAddresses_;    // the addresses it permits (connected custom DNS)
+    scoped_permits::PermittedAppsTracker<AppsIds> baselineApps_;
+
     std::thread monitor_;
     HANDLE stopMonitorEvent_ = nullptr;
 
@@ -66,6 +85,16 @@ private:
     void updatePermittedApps();
     // false when the adapters could not be read (an empty set is a valid answer).
     bool getDnsServers(std::set<types::IpAddress> &dnsServers);
+    // Also the physical adapters (not Windscribe's, not loopback), by LUID.
+    bool getAdapters(std::set<types::IpAddress> &dnsServers, std::set<uint64_t> &physicalInterfaces);
+
+    // The custom connected DNS addresses the baseline permits: only while the session filter is in
+    // its connected mode.
+    std::set<types::IpAddress> baselinePermittedAddresses() const;
+    void applyBaselineImpl();
+    void updateBaselineIfNeeded();
+    bool removeBaselineImpl();
+    bool baselineExists();
 
     void startMonitor();
     void stopMonitor();

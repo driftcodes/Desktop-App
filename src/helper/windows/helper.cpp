@@ -66,6 +66,12 @@ bool Helper::onInit()
     if (!FirewallOnBootManager::instance().isEnabled()) {
         spdlog::info("Firewall on boot is not enabled, turning off firewall");
         FirewallFilter::instance().off();
+        DnsFirewall::instance().setBaselineEnabled(false);
+    } else if (FirewallFilter::instance().currentStatus()) {
+        // The firewall kept from before (Always On): so is its DNS baseline.
+        DnsFirewall::instance().adoptBaselineAtStart();
+    } else {
+        DnsFirewall::instance().setBaselineEnabled(false);
     }
 
     return true;

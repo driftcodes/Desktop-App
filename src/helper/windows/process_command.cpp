@@ -332,6 +332,9 @@ std::string firewallOn(const std::string &pars)
     }
     bool prevStatus = FirewallFilter::instance().currentStatus();
     const bool isComplete = FirewallFilter::instance().on(connectingIp.c_str(), ips, windscribeOnlyIps, bAllowLanTraffic, bIsCustomConfig);
+    // The DNS baseline follows the main firewall: no program but Windscribe's and excluded apps sends
+    // DNS out of a physical adapter while it is on, whatever the LAN permit allows.
+    DnsFirewall::instance().setBaselineEnabled(true);
     if (!prevStatus) {
         SplitTunneling::instance().updateState();
     }
@@ -346,6 +349,7 @@ std::string firewallOff(const std::string &pars)
 
     bool prevStatus = FirewallFilter::instance().currentStatus();
     FirewallFilter::instance().off();
+    DnsFirewall::instance().setBaselineEnabled(false);
     if (prevStatus) {
         SplitTunneling::instance().updateState();
     }
