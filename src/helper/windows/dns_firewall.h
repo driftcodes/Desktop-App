@@ -58,7 +58,10 @@ public:
     // left in place (they cover every adapter and already permit the excluded apps, which the client
     // only sends later) and rebuild once the client has sent them, or a tunnel adapter appears. One
     // is built if none is there.
-    void adoptBaselineAtStart();
+    // Returns whether a baseline is in place afterwards; if not, the caller holds the main firewall's
+    // LAN permit.
+    bool adoptBaselineAtStart();
+    bool isBaselineInPlace();
 
 private:
     std::recursive_mutex mutex_;
@@ -74,6 +77,7 @@ private:
 
     // The baseline.
     GUID baselineSubLayerGUID_;
+    GUID legacyBaselineSubLayerGUID_;
     bool isBaselineEnabled_ = false;
     bool isBaselineInPlace_ = false;           // its blocks are installed
     bool isReadyNotificationPending_ = false;  // got in since the monitor last looked
@@ -103,7 +107,10 @@ private:
     void applyBaselineImpl();
     void updateBaselineIfNeeded();
     bool removeBaselineImpl();
-    bool baselineExists();
+    bool removeSublayerWithFilters(const GUID &subLayer);
+    // Looks for the baseline's global port-53 blocks among the installed filters.
+    void findBaselineBlocks(bool &isV4Found, bool &isV6Found);
+    void addTunnelPermitsWhileWaiting();
 
     void startMonitor();
     void stopMonitor();

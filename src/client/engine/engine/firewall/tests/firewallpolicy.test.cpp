@@ -1104,4 +1104,26 @@ void TestFirewallPolicy::testIgnoredConnectorRequestIsNotInstalled()
     QCOMPARE(helper.inPlace, DnsLeakFilter::kPermitWindscribeApps);
 }
 
+void TestFirewallPolicy::testFailedBaselineHoldsConnectionDespiteSessionFilter()
+{
+    using namespace firewall_policy;
+    // The session DNS leak filter goes in fine ...
+    FakeDnsLeakFilterHelper helper;
+    auto filter = helper.makeController();
+    filter.onConnectRequest(true, false);
+    filter.onConnectState(CONNECT_STATE_CONNECTING, true, false);
+    QVERIFY(filter.mayConnect(true));
+    QVERIFY(filter.mayStartAttempt(true));
+    // ... but the helper reported the firewall incomplete (no DNS baseline): no connection, no
+    // attempt, and a tunnel that comes up is not reported connected.
+    const bool isFirewallOn = true;
+    const bool isFirewallComplete = false;
+    QVERIFY(!(filter.mayConnect(true) && mayProceedWithFirewall(isFirewallOn, isFirewallComplete)));
+    QVERIFY(!(filter.mayStartAttempt(true) && mayProceedWithFirewall(isFirewallOn, isFirewallComplete)));
+    QVERIFY(!(filter.mayReportConnected() && mayProceedWithFirewall(isFirewallOn, isFirewallComplete)));
+    // Complete, or the firewall off (nothing to require): it may.
+    QVERIFY(mayProceedWithFirewall(true, true));
+    QVERIFY(mayProceedWithFirewall(false, false));
+}
+
 QTEST_MAIN(TestFirewallPolicy)

@@ -54,6 +54,72 @@ bool FirewallFilter::on(const wchar_t *connectingIp, const std::vector<std::wstr
     return isComplete;
 }
 
+bool FirewallFilter::addLinkLocalDnsBlock(HANDLE engineHandle)
+{
+    // IPv6 link-local stays permitted (weight 8) whatever the LAN setting, for neighbor discovery and
+    // the like; DNS to it is not, while the DNS baseline is missing. Weight 9: above that permit.
+    const std::vector<types::IpAddressRange> linkLocalV6 = { types::IpAddressRange("fe80::/10") };
+    const bool ret = Utils::addFilterV6(engineHandle, nullptr, FWP_ACTION_BLOCK, 9, subLayerGUID_, FIREWALL_SUBLAYER_NAMEW,
+                                        nullptr, &linkLocalV6, 0, 53);
+    if (!ret) {
+        spdlog::error("Could not add the IPv6 link-local DNS block");
+    }
+    return ret;
+}
+
+bool FirewallFilter::holdLanPermit()
+{
+    // Service start, the firewall kept from before and no DNS baseline: without the client's request
+    // the rules cannot be rebuilt, so remove the LAN permits (the weight-4 permits are exactly those)
+    // and block DNS to IPv6 link-local. The client's next firewallOn rebuilds everything.
+    std::lock_guard<std::recursive_mutex> guard(mutex_);
+    HANDLE hEngine = fwpmWrapper_.getHandleAndLock();
+    bool isHeld = fwpmWrapper_.beginTransaction();
+    if (isHeld) {
+        const GUID layers[] = {FWPM_LAYER_ALE_AUTH_CONNECT_V4, FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4,
+                               FWPM_LAYER_ALE_AUTH_CONNECT_V6, FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6};
+        std::vector<UINT64> lanPermits;
+        for (const GUID &layer : layers) {
+            FWPM_FILTER_ENUM_TEMPLATE0 enumTemplate;
+            ZeroMemory(&enumTemplate, sizeof(enumTemplate));
+            enumTemplate.layerKey = layer;
+            enumTemplate.actionMask = 0xFFFFFFFF;
+            HANDLE enumHandle = NULL;
+            if (FwpmFilterCreateEnumHandle0(hEngine, &enumTemplate, &enumHandle) != ERROR_SUCCESS) {
+                isHeld = false;
+                continue;
+            }
+            FWPM_FILTER0 **filters = nullptr;
+            UINT32 count = 0;
+            while (FwpmFilterEnum0(hEngine, enumHandle, INFINITE, &filters, &count) == ERROR_SUCCESS && count > 0) {
+                for (UINT32 k = 0; k < count; ++k) {
+                    const FWPM_FILTER0 &f = *filters[k];
+                    if (f.subLayerKey == subLayerGUID_ && f.action.type == FWP_ACTION_PERMIT &&
+                        f.weight.type == FWP_UINT8 && f.weight.uint8 == 4) {
+                        lanPermits.push_back(f.filterId);
+                    }
+                }
+                FwpmFreeMemory0((void **)&filters);
+            }
+            FwpmFilterDestroyEnumHandle0(hEngine, enumHandle);
+        }
+        for (const UINT64 id : lanPermits) {
+            if (FwpmFilterDeleteById0(hEngine, id) != ERROR_SUCCESS) {
+                isHeld = false;
+            }
+        }
+        isHeld = isHeld && addLinkLocalDnsBlock(hEngine);
+        if (isHeld) {
+            isHeld = fwpmWrapper_.endTransaction();
+        } else {
+            fwpmWrapper_.abortTransaction();
+        }
+        spdlog::info("FirewallFilter::holdLanPermit(): {} LAN permit filter(s), held: {}", lanPermits.size(), isHeld);
+    }
+    fwpmWrapper_.unlock();
+    return isHeld;
+}
+
 void FirewallFilter::off()
 {
     std::lock_guard<std::recursive_mutex> guard(mutex_);
@@ -392,6 +458,9 @@ bool FirewallFilter::addFilters(HANDLE engineHandle, const wchar_t *connectingIp
     // Held back while the DNS baseline is not in place: the LAN permit would let any program query a
     // router's DNS.
     bool bAllowLan = (bAllowLocalTraffic || bIsCustomConfig) && !bHoldLanPermit;
+    if (bHoldLanPermit && !addLinkLocalDnsBlock(engineHandle)) {
+        isComplete = false;
+    }
     const std::vector<types::IpAddressRange> privV4 = types::IpAddressRange::fromStrings(
         {"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16"});
     ret = Utils::addFilterV4(engineHandle, nullptr, bAllowLan ? FWP_ACTION_PERMIT : FWP_ACTION_BLOCK, 4, subLayerGUID_, FIREWALL_SUBLAYER_NAMEW, nullptr, &privV4);

@@ -17,6 +17,7 @@ public:
                     bool isVpnConnected, const QSet<QString> &windscribeOnlyIps = QSet<QString>()) override;
     void firewallOff() override;
     bool firewallActualState() override;
+    bool isFirewallComplete() const override;
 
     bool whitelistPorts(const api_responses::StaticIpPortsVector &ports) override;
     bool deleteWhitelistPorts() override;
@@ -26,5 +27,6 @@ public:
 
 private:
     Helper *helper_;
-    QMutex mutex_;
+    mutable QMutex mutex_;
+    bool isLastApplyComplete_ = true;
 };

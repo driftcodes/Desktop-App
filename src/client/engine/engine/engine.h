@@ -372,6 +372,9 @@ private:
     // processes, instead of following each OpenVPN process.
     void updateProxiedDnsLeakProtection(CONNECT_STATE state, DISCONNECT_REASON reason);
     firewall_policy::DnsLeakFilterSendResult sendProxiedDnsLeakFilter(firewall_policy::DnsLeakFilter filter);
+    // With the firewall on: whether the helper applied it completely, DNS baseline included (resent
+    // once if not). Connecting, each attempt and reporting connected wait for it.
+    bool isFirewallDnsProtected();
     std::unique_ptr<firewall_policy::ProxiedDnsLeakFilter> proxiedDnsLeakFilter_;
 #endif
 

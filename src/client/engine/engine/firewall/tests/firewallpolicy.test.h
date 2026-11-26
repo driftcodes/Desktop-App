@@ -32,6 +32,7 @@ private slots:
     void testSecondFailedHandOverBeforeReclaimKeepsRules();
     void testDirectWireGuardOrIkev2AfterProxiedOpenVpn();
     void testIgnoredConnectorRequestIsNotInstalled();
+    void testFailedBaselineHoldsConnectionDespiteSessionFilter();
     void testRetryBacksOffAndStopsOnSuccess();
     void testDnsLeakFilterKeptAfterErrorUntilFirewallOff();
 };

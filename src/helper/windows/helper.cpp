@@ -68,8 +68,13 @@ bool Helper::onInit()
         FirewallFilter::instance().off();
         DnsFirewall::instance().setBaselineEnabled(false);
     } else if (FirewallFilter::instance().currentStatus()) {
-        // The firewall kept from before (Always On): so is its DNS baseline.
-        DnsFirewall::instance().adoptBaselineAtStart();
+        // The firewall kept from before (Always On): so is its DNS baseline, if it is verifiably
+        // there; otherwise one is built, and if that fails the firewall's LAN permit is held back
+        // until the client's next firewallOn.
+        if (!DnsFirewall::instance().adoptBaselineAtStart()) {
+            spdlog::error("No DNS baseline at service start; holding the firewall's LAN permit");
+            FirewallFilter::instance().holdLanPermit();
+        }
     } else {
         DnsFirewall::instance().setBaselineEnabled(false);
     }

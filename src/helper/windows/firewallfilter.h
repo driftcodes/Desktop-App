@@ -28,6 +28,10 @@ public:
     bool on(const wchar_t *connectingIp, const std::vector<std::wstring> &ips, const std::vector<std::wstring> &windscribeOnlyIps,
             bool bAllowLocalTraffic, bool bIsCustomConfig, bool bHoldLanPermit = false);
     void off();
+    // Removes the LAN permits of the firewall in place (kept from before, at service start) and
+    // blocks DNS to IPv6 link-local: while no DNS baseline is in place they would let any program
+    // query a router's DNS.
+    bool holdLanPermit();
     bool currentStatus();
 
     // split tunnelling parameters
@@ -59,6 +63,7 @@ private:
                     const std::vector<std::wstring> &windscribeOnlyIps, bool bAllowLocalTraffic, bool bIsCustomConfig,
                     bool bHoldLanPermit);
     void addPermitFilterForVpnAndSystemServices(HANDLE engineHandle, const wchar_t *ip);
+    bool addLinkLocalDnsBlock(HANDLE engineHandle);
     void addPermitFilterForAppsIds(HANDLE engineHandle);
     void addPermitFilterForSplitRoutingWhitelistIps(HANDLE engineHandle);
 

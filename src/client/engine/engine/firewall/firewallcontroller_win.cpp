@@ -25,18 +25,25 @@ void FirewallController_win::firewallOn(const QString &connectingIp, const QSet<
                                         << "Windscribe-only ips count:" << windscribeOnlyIps.count();
         isApplied = helper_->firewallOn(connectingIp, QStringList(ips.begin(), ips.end()),
                                         QStringList(windscribeOnlyIps.begin(), windscribeOnlyIps.end()), bAllowLanTraffic, bIsCustomConfig);
+        isLastApplyComplete_ = isApplied;
         if (!isApplied) {
             // The firewall is on (blocking more, not less), but e.g. the DNS servers Windscribe needs
             // to reconnect through the proxy may not be permitted. Not committing makes the next
             // firewall update send it again; the helper re-detects Windscribe's programs then.
-            qCCritical(LOG_FIREWALL_CONTROLLER) << "firewall is on, but the helper could not add every permit"
-                                                << "(Windscribe-only ips count:" << windscribeOnlyIps.count()
-                                                << "); Windscribe may be unable to resolve hostnames until this is retried";
+            qCCritical(LOG_FIREWALL_CONTROLLER) << "firewall is on, but the helper could not apply it completely"
+                                                << "(DNS baseline, or a permit; Windscribe-only ips count:" << windscribeOnlyIps.count()
+                                                << "); connections are held and it is retried";
         }
     }
     if (isApplied) {
         commitFirewallOn(connectingIp, ips, bAllowLanTraffic, bIsCustomConfig, isVpnConnected, windscribeOnlyIps);
     }
+}
+
+bool FirewallController_win::isFirewallComplete() const
+{
+    QMutexLocker locker(&mutex_);
+    return isLastApplyComplete_;
 }
 
 void FirewallController_win::firewallOff()
@@ -47,6 +54,7 @@ void FirewallController_win::firewallOff()
     {
         qCInfo(LOG_FIREWALL_CONTROLLER) << "firewall disabled";
         helper_->firewallOff();
+        isLastApplyComplete_ = true;
     }
     commitFirewallOff();
 }

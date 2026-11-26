@@ -218,6 +218,43 @@ inline std::vector<BaselineRule> persistentBaselineRules(const std::vector<Basel
     return persistent;
 }
 
+// What the helper finds about an installed filter, to tell whether the baseline's global blocks are
+// really there at service start (a sublayer can exist with other rules in it, e.g. an older
+// per-adapter version, or none).
+struct InstalledFilter
+{
+    bool isBlock;
+    bool isPersistent;
+    bool hasRemotePort53;
+    bool hasInterfaceCondition;
+    bool hasAddressCondition;
+    bool hasAppCondition;
+};
+
+inline bool isGlobalBaselineBlock(const InstalledFilter &f)
+{
+    return f.isBlock && f.isPersistent && f.hasRemotePort53 && !f.hasInterfaceCondition && !f.hasAddressCondition &&
+           !f.hasAppCondition;
+}
+
+// Service start with the firewall kept from before: keep the saved baseline only if both global
+// blocks (IPv4 and IPv6) are verified; otherwise build one, and if that fails too, hold the main
+// firewall's LAN permit (without the client's request: remove it) until the baseline gets in.
+enum class BaselineAtStart { kKeepSaved, kBuild };
+
+inline BaselineAtStart planBaselineAtStart(bool isV4BlockVerified, bool isV6BlockVerified)
+{
+    return isV4BlockVerified && isV6BlockVerified ? BaselineAtStart::kKeepSaved : BaselineAtStart::kBuild;
+}
+
+// The ready callback restores a held LAN permit only if, when it runs, a request is still held, the
+// firewall is on and the baseline is in place now: a callback from an earlier activation must not
+// restore the LAN permit of a later one whose baseline failed.
+inline bool shouldRestoreLanPermit(bool isRequestHeld, bool isFirewallOn, bool isBaselineInPlaceNow)
+{
+    return isRequestHeld && isFirewallOn && isBaselineInPlaceNow;
+}
+
 // firewallOn with the DNS baseline: the baseline goes in first. Without it in place the main firewall
 // is turned on without its LAN permit (so the LAN DNS path stays closed), the request counts as
 // incomplete for the client, and the LAN permit is added once the baseline is in.

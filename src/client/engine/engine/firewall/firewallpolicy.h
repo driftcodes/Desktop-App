@@ -29,6 +29,15 @@ void leaveConnection(FirewallController &controller, FirewallExceptions &excepti
                      const std::function<QSet<QString>()> &notConnectedIps,
                      const std::function<QSet<QString>()> &windscribeOnlyIps, bool allowLanTraffic, bool isCustomConfig);
 
+// With the firewall on, a connection (and each attempt, and reporting it connected) needs the
+// firewall applied completely: on Windows that includes the DNS baseline, without which the helper
+// holds the LAN permit back and reports it incomplete. The session DNS leak filter being in place
+// does not make up for it.
+inline bool mayProceedWithFirewall(bool isFirewallOn, bool isFirewallComplete)
+{
+    return !isFirewallOn || isFirewallComplete;
+}
+
 // Windows DNS leak filter (port 53 to the physical adapters' DNS servers) for a session started with a
 // proxy set. It is on from the first CONNECTING to the final DISCONNECTED, reconnects and the gaps
 // between OpenVPN processes included. While not connected Windscribe's programs and Exclusive-mode

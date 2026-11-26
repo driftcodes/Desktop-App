@@ -429,6 +429,51 @@ void testFirstBaselineInstallFails()
     VERIFY(!scoped_permits::baselineAllows(store.committed, kWifi, ip("192.168.31.1"), false));
 }
 
+void testStartupVerifiesSavedBaseline()
+{
+    using scoped_permits::BaselineAtStart;
+    using scoped_permits::InstalledFilter;
+    // The first version's per-adapter block (an interface condition) is not the global block.
+    InstalledFilter perAdapter = {true, true, true, true, false, false};
+    VERIFY(!scoped_permits::isGlobalBaselineBlock(perAdapter));
+    // Nor is a permit, an address-scoped or program-scoped rule, or a non-persistent one.
+    VERIFY(!scoped_permits::isGlobalBaselineBlock({false, true, true, false, false, false}));
+    VERIFY(!scoped_permits::isGlobalBaselineBlock({true, true, true, false, true, false}));
+    VERIFY(!scoped_permits::isGlobalBaselineBlock({true, true, true, false, false, true}));
+    VERIFY(!scoped_permits::isGlobalBaselineBlock({true, false, true, false, false, false}));
+    VERIFY(scoped_permits::isGlobalBaselineBlock({true, true, true, false, false, false}));
+
+    // Saved rules for adapter A only (or the first version's), adapters A and B present, no GUI:
+    // not both global blocks found, so a baseline is built instead of trusting them.
+    VERIFY(scoped_permits::planBaselineAtStart(false, false) == BaselineAtStart::kBuild);
+    VERIFY(scoped_permits::planBaselineAtStart(true, false) == BaselineAtStart::kBuild);
+    VERIFY(scoped_permits::planBaselineAtStart(true, true) == BaselineAtStart::kKeepSaved);
+
+    // The firewall survived (Always On) but no baseline, and building one fails, before the GUI:
+    // the LAN permit is held (FirewallFilter::holdLanPermit), as for a failed firewallOn.
+    FakeBaselineStore store;
+    store.failAddAt = 0;
+    VERIFY(scoped_permits::replaceDnsRules(store, true, scoped_permits::dnsBaselineRules({}, {}, 3)) ==
+           scoped_permits::ReplaceResult::kKeptPrevious);
+    VERIFY(scoped_permits::planFirewallOn(false, true).holdLanPermit);
+}
+
+void testStaleReadyCallbackDoesNotRestoreLan()
+{
+    // Activation 1's baseline gets in; before its callback runs, the firewall is turned off and on
+    // (activation 2) and activation 2's baseline fails, so its LAN permit is held. The late callback
+    // must not restore it.
+    const bool isRequestHeld = true;      // activation 2's request
+    const bool isFirewallOn = true;
+    const bool isBaselineInPlaceNow = false;
+    VERIFY(!scoped_permits::shouldRestoreLanPermit(isRequestHeld, isFirewallOn, isBaselineInPlaceNow));
+    // Once activation 2's baseline does get in, it is restored.
+    VERIFY(scoped_permits::shouldRestoreLanPermit(true, true, true));
+    // Nothing held, or the firewall off: nothing to restore.
+    VERIFY(!scoped_permits::shouldRestoreLanPermit(false, true, true));
+    VERIFY(!scoped_permits::shouldRestoreLanPermit(true, false, true));
+}
+
 } // namespace
 
 int main()
@@ -445,6 +490,8 @@ int main()
     testBaselineBlocksDnsOnEveryAdapter();
     testBaselineAfterReboot();
     testFirstBaselineInstallFails();
+    testStartupVerifiesSavedBaseline();
+    testStaleReadyCallbackDoesNotRestoreLan();
     if (g_failures == 0) {
         printf("All scoped permit tests passed.\n");
     }

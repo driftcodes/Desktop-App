@@ -23,6 +23,9 @@ public:
                             bool isVpnConnected, const QSet<QString> &windscribeOnlyIps = QSet<QString>());
     virtual void firewallOff();
     virtual bool firewallActualState() = 0;
+    // Whether the helper applied the last firewallOn completely (Windows: including the DNS baseline
+    // that keeps DNS off the LAN). An incomplete one is not committed, so the next update resends it.
+    virtual bool isFirewallComplete() const { return true; }
 
     virtual bool whitelistPorts(const api_responses::StaticIpPortsVector &ports);
     virtual bool deleteWhitelistPorts();

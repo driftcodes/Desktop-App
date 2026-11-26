@@ -75,11 +75,15 @@ Emergency Connect is unchanged and never uses the proxy.
   internet then anyway); local names from the router's DNS do not resolve either. Turning the
   firewall off removes it.
   - The firewall goes on only after the baseline is in. If Windows cannot install it, the firewall
-    goes on without its LAN permit (so no router DNS either, but also no router page or printers),
-    the app logs the failure, and the LAN permit comes back once a retry gets the baseline in.
+    goes on without its LAN permit and with DNS to IPv6 link-local blocked (so no router DNS either,
+    but also no router page or printers), and the LAN permit comes back once a retry gets the
+    baseline in. Meanwhile Windscribe does not connect (nor retry, nor report Connected): you get the
+    "could not set up its DNS leak protection" error.
   - After a restart, the baseline's block and the permit for Windscribe and your excluded apps are
     already there when the app starts (they persist, like the firewall's rules); the tunnel and
-    custom-DNS permits are set up again when you connect. "Already there" means from when Windows
+    custom-DNS permits are set up again when you connect. When the service starts it checks that both
+    global blocks (IPv4 and IPv6) really are installed before relying on them; if not, it builds the
+    baseline, and if that fails it removes the firewall's LAN permit until the app is running. "Already there" means from when Windows
     loads persistent firewall rules during startup (the Base Filtering Engine), not from the very
     first moment the network starts; the main firewall works the same way. A test after you sign in,
     before opening Windscribe, covers that state.
@@ -160,7 +164,8 @@ Emergency Connect is unchanged and never uses the proxy.
   given for the boot-time firewall: the helper simply keeps the rules it last applied, which persist
   across a restart, and the DNS baseline's persistent part with them (see above). When the service
   starts it keeps that baseline (it already permits your excluded apps) until the app has sent its
-  split tunneling list, then rebuilds it. The DNS leak filter itself does not persist; it is set up
+  split tunneling list, then rebuilds it; a Windscribe tunnel adapter present meanwhile only gets its
+  own permit added, so Throne keeps its saved one. The DNS leak filter itself does not persist; it is set up
   again when you connect. This has not been confirmed on a real Windows restart yet.
 
 ### Reconnecting

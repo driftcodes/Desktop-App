@@ -14,7 +14,9 @@
 #define FIREWALL_SUBLAYER_DNS_NAMEW WS_APP_IDENTIFIER_W L"DnsFirewallSublayer"
 #define UUID_LAYER_DNS L"7e4a5678-bc70-45e8-8674-21a8e610fd02"
 #define FIREWALL_SUBLAYER_DNS_BASELINE_NAMEW WS_APP_IDENTIFIER_W L"DnsBaselineSublayer"
-#define UUID_LAYER_DNS_BASELINE L"c4b2f1d6-6a3e-4e8b-9d27-5f0a8e3b71c9"
+// v2: global blocks. The id of the first version (per-adapter blocks) is removed at start.
+#define UUID_LAYER_DNS_BASELINE L"9a3d5e71-2c4b-4f8e-b6a1-73d0c5e9f214"
+#define UUID_LAYER_DNS_BASELINE_V1 L"c4b2f1d6-6a3e-4e8b-9d27-5f0a8e3b71c9"
 
 
 DnsFirewall::DnsFirewall(FwpmWrapper &fwmpWrapper) : fwmpWrapper_(fwmpWrapper), bCurrentState_(false)
@@ -23,6 +25,7 @@ DnsFirewall::DnsFirewall(FwpmWrapper &fwmpWrapper) : fwmpWrapper_(fwmpWrapper), 
     WSAStartup(MAKEWORD(2, 2), &wsaData);
     UuidFromString((RPC_WSTR)UUID_LAYER_DNS, &subLayerGUID_);
     UuidFromString((RPC_WSTR)UUID_LAYER_DNS_BASELINE, &baselineSubLayerGUID_);
+    UuidFromString((RPC_WSTR)UUID_LAYER_DNS_BASELINE_V1, &legacyBaselineSubLayerGUID_);
 }
 
 DnsFirewall::~DnsFirewall()
@@ -355,16 +358,24 @@ void DnsFirewall::setBaselineReadyCallback(std::function<void()> callback)
     baselineReadyCallback_ = std::move(callback);
 }
 
-void DnsFirewall::adoptBaselineAtStart()
+bool DnsFirewall::adoptBaselineAtStart()
 {
     std::lock_guard<std::recursive_mutex> guard(mutex_);
     isBaselineEnabled_ = true;
     startMonitor();
-    if (!baselineExists()) {
-        spdlog::info("DnsFirewall: no DNS baseline from before; building one");
+    if (!removeSublayerWithFilters(legacyBaselineSubLayerGUID_)) {
+        spdlog::error("DnsFirewall: could not remove the first version's DNS baseline");
+    }
+    bool isV4Verified = false;
+    bool isV6Verified = false;
+    findBaselineBlocks(isV4Verified, isV6Verified);
+    if (scoped_permits::planBaselineAtStart(isV4Verified, isV6Verified) == scoped_permits::BaselineAtStart::kBuild) {
+        spdlog::info("DnsFirewall: no complete DNS baseline from before (v4 block {}, v6 block {}); building one",
+                     isV4Verified, isV6Verified);
+        isBaselineInPlace_ = false;
         isBaselineDirty_ = true;
         updateBaselineIfNeeded();
-        return;
+        return isBaselineInPlace_;
     }
     // The persistent rules from before block DNS on every adapter (including any added while Windows
     // was off) and, unlike a rebuild now, already permit the excluded apps, which the client only
@@ -373,13 +384,58 @@ void DnsFirewall::adoptBaselineAtStart()
     baselineTunnels_.clear();
     baselineAddresses_.clear();
     isWaitingForExcludedApps_ = !isExcludedAppsKnown_;
-    spdlog::info("DnsFirewall: keeping the DNS baseline from before until the client's excluded apps arrive");
-    // A Windscribe tunnel adapter left over needs its permit now.
+    spdlog::info("DnsFirewall: keeping the verified DNS baseline from before until the client's excluded apps arrive");
+    addTunnelPermitsWhileWaiting();
+    return true;
+}
+
+bool DnsFirewall::isBaselineInPlace()
+{
+    std::lock_guard<std::recursive_mutex> guard(mutex_);
+    return isBaselineEnabled_ && isBaselineInPlace_;
+}
+
+void DnsFirewall::addTunnelPermitsWhileWaiting()
+{
+    // A Windscribe tunnel adapter needs its permit, but rebuilding now would drop the saved permit
+    // for the excluded apps (Throne) until the client sends them: add only the tunnel permits.
+    if (!isWaitingForExcludedApps_) {
+        return;
+    }
     std::set<types::IpAddress> servers;
     std::set<uint64_t> tunnels;
-    if (getAdapters(servers, tunnels) && !tunnels.empty()) {
-        isWaitingForExcludedApps_ = false;
-        updateBaselineIfNeeded();
+    if (!getAdapters(servers, tunnels)) {
+        return;
+    }
+    std::vector<scoped_permits::BaselineRule> rules;
+    for (const auto &rule : scoped_permits::dnsBaselineRules(tunnels, {}, 0)) {
+        if (rule.action == scoped_permits::BaselineAction::kPermitTunnel && baselineTunnels_.count(rule.interfaceLuid) == 0) {
+            rules.push_back(rule);
+        }
+    }
+    if (rules.empty()) {
+        return;
+    }
+    AppsIds noApps;
+    HANDLE hEngine = fwmpWrapper_.getHandleAndLock();
+    WfpBaselineRuleStore store(fwmpWrapper_, hEngine, baselineSubLayerGUID_, noApps);
+    bool isAdded = store.begin() && store.ensureSublayer();
+    for (const auto &rule : rules) {
+        isAdded = isAdded && store.add(rule);
+    }
+    if (isAdded) {
+        isAdded = store.commit();
+    } else {
+        store.abort();
+    }
+    fwmpWrapper_.unlock();
+    if (isAdded) {
+        for (const auto &rule : rules) {
+            baselineTunnels_.insert(rule.interfaceLuid);
+        }
+        spdlog::info("DnsFirewall: added DNS baseline permits for {} tunnel adapter(s), saved rules kept", rules.size() / 2);
+    } else {
+        spdlog::error("DnsFirewall: could not add the tunnel adapter's DNS baseline permit; retrying");
     }
 }
 
@@ -449,26 +505,8 @@ void DnsFirewall::applyBaselineImpl()
 
 bool DnsFirewall::removeBaselineImpl()
 {
-    HANDLE hEngine = fwmpWrapper_.getHandleAndLock();
-    bool isRemoved = false;
-    if (fwmpWrapper_.beginTransaction()) {
-        bool allDeleted = true;
-        const GUID layers[] = {FWPM_LAYER_ALE_AUTH_CONNECT_V4, FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4,
-                               FWPM_LAYER_ALE_AUTH_CONNECT_V6, FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6};
-        for (const GUID &layer : layers) {
-            Utils::deleteAllFiltersForSublayer(hEngine, &baselineSubLayerGUID_, layer, &allDeleted);
-        }
-        if (allDeleted) {
-            const DWORD ret = FwpmSubLayerDeleteByKey0(hEngine, &baselineSubLayerGUID_);
-            if (ret != ERROR_SUCCESS && ret != FWP_E_SUBLAYER_NOT_FOUND) {
-                spdlog::error("DnsFirewall: baseline FwpmSubLayerDeleteByKey0 failed: {}", ret);
-            }
-            isRemoved = fwmpWrapper_.endTransaction();
-        } else {
-            fwmpWrapper_.abortTransaction();
-        }
-    }
-    fwmpWrapper_.unlock();
+    removeSublayerWithFilters(legacyBaselineSubLayerGUID_);
+    const bool isRemoved = removeSublayerWithFilters(baselineSubLayerGUID_);
     if (isRemoved) {
         isBaselineInPlace_ = false;
         baselineTunnels_.clear();
@@ -481,16 +519,79 @@ bool DnsFirewall::removeBaselineImpl()
     return isRemoved;
 }
 
-bool DnsFirewall::baselineExists()
+void DnsFirewall::findBaselineBlocks(bool &isV4Found, bool &isV6Found)
 {
+    isV4Found = false;
+    isV6Found = false;
     HANDLE hEngine = fwmpWrapper_.getHandleAndLock();
-    FWPM_SUBLAYER0 *subLayer = nullptr;
-    const DWORD ret = FwpmSubLayerGetByKey0(hEngine, &baselineSubLayerGUID_, &subLayer);
-    if (subLayer != nullptr) {
-        FwpmFreeMemory0((void **)&subLayer);
+    const GUID layers[2] = {FWPM_LAYER_ALE_AUTH_CONNECT_V4, FWPM_LAYER_ALE_AUTH_CONNECT_V6};
+    for (int i = 0; i < 2; ++i) {
+        bool &isFound = i == 0 ? isV4Found : isV6Found;
+        FWPM_FILTER_ENUM_TEMPLATE0 enumTemplate;
+        ZeroMemory(&enumTemplate, sizeof(enumTemplate));
+        enumTemplate.layerKey = layers[i];
+        enumTemplate.actionMask = 0xFFFFFFFF;
+        HANDLE enumHandle = NULL;
+        if (FwpmFilterCreateEnumHandle0(hEngine, &enumTemplate, &enumHandle) != ERROR_SUCCESS) {
+            spdlog::error("DnsFirewall: could not enumerate filters to verify the DNS baseline");
+            continue;
+        }
+        FWPM_FILTER0 **filters = nullptr;
+        UINT32 count = 0;
+        while (!isFound && FwpmFilterEnum0(hEngine, enumHandle, INFINITE, &filters, &count) == ERROR_SUCCESS && count > 0) {
+            for (UINT32 k = 0; k < count && !isFound; ++k) {
+                const FWPM_FILTER0 &f = *filters[k];
+                if (f.subLayerKey != baselineSubLayerGUID_) {
+                    continue;
+                }
+                scoped_permits::InstalledFilter summary = {};
+                summary.isBlock = f.action.type == FWP_ACTION_BLOCK;
+                summary.isPersistent = (f.flags & FWPM_FILTER_FLAG_PERSISTENT) != 0;
+                for (UINT32 j = 0; j < f.numFilterConditions; ++j) {
+                    const FWPM_FILTER_CONDITION0 &cond = f.filterCondition[j];
+                    if (cond.fieldKey == FWPM_CONDITION_IP_REMOTE_PORT && cond.conditionValue.type == FWP_UINT16 &&
+                        cond.conditionValue.uint16 == 53) {
+                        summary.hasRemotePort53 = true;
+                    } else if (cond.fieldKey == FWPM_CONDITION_IP_LOCAL_INTERFACE) {
+                        summary.hasInterfaceCondition = true;
+                    } else if (cond.fieldKey == FWPM_CONDITION_IP_REMOTE_ADDRESS) {
+                        summary.hasAddressCondition = true;
+                    } else if (cond.fieldKey == FWPM_CONDITION_ALE_APP_ID) {
+                        summary.hasAppCondition = true;
+                    }
+                }
+                isFound = scoped_permits::isGlobalBaselineBlock(summary);
+            }
+            FwpmFreeMemory0((void **)&filters);
+        }
+        FwpmFilterDestroyEnumHandle0(hEngine, enumHandle);
     }
     fwmpWrapper_.unlock();
-    return ret == ERROR_SUCCESS;
+}
+
+bool DnsFirewall::removeSublayerWithFilters(const GUID &subLayer)
+{
+    HANDLE hEngine = fwmpWrapper_.getHandleAndLock();
+    bool isRemoved = false;
+    if (fwmpWrapper_.beginTransaction()) {
+        bool allDeleted = true;
+        const GUID layers[] = {FWPM_LAYER_ALE_AUTH_CONNECT_V4, FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4,
+                               FWPM_LAYER_ALE_AUTH_CONNECT_V6, FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6};
+        for (const GUID &layer : layers) {
+            Utils::deleteAllFiltersForSublayer(hEngine, &subLayer, layer, &allDeleted);
+        }
+        if (allDeleted) {
+            const DWORD ret = FwpmSubLayerDeleteByKey0(hEngine, &subLayer);
+            if (ret != ERROR_SUCCESS && ret != FWP_E_SUBLAYER_NOT_FOUND) {
+                spdlog::error("DnsFirewall: FwpmSubLayerDeleteByKey0 failed: {}", ret);
+            }
+            isRemoved = fwmpWrapper_.endTransaction();
+        } else {
+            fwmpWrapper_.abortTransaction();
+        }
+    }
+    fwmpWrapper_.unlock();
+    return isRemoved;
 }
 
 void DnsFirewall::startMonitor()
@@ -591,14 +692,8 @@ void DnsFirewall::checkForChanges()
     }
     bool hasBecomeReady = false;
     if (isBaselineEnabled_) {
-        if (isWaitingForExcludedApps_) {
-            // A Windscribe tunnel adapter appearing needs its permit; it does not wait for the client.
-            std::set<types::IpAddress> servers;
-            std::set<uint64_t> tunnels;
-            if (getAdapters(servers, tunnels) && !tunnels.empty()) {
-                isWaitingForExcludedApps_ = false;
-            }
-        }
+        // A Windscribe tunnel adapter appearing while the saved rules are kept gets its permit added.
+        addTunnelPermitsWhileWaiting();
         updateBaselineIfNeeded();
         hasBecomeReady = isReadyNotificationPending_ && isBaselineInPlace_;
         isReadyNotificationPending_ = false;

@@ -745,7 +745,9 @@ void Engine::initPart2()
                 }
             });
         });
-    connectionManager_->setAttemptGate([this](bool isProxied) { return proxiedDnsLeakFilter_->mayStartAttempt(isProxied); });
+    connectionManager_->setAttemptGate([this](bool isProxied) {
+        return proxiedDnsLeakFilter_->mayStartAttempt(isProxied) && isFirewallDnsProtected();
+    });
     // A DNS leak filter kept after a proxied session ended goes off with the firewall.
     connect(this, &Engine::firewallStateChanged, this, [this](bool isEnabled) {
         if (!isEnabled) {
@@ -1168,8 +1170,8 @@ void Engine::connectImpl(const LocationID &locationId, const types::ConnectionSe
     // blocks: otherwise a router acting as DNS stays reachable through the LAN permit. The filter keeps
     // being retried in the background.
     // doConnect() builds the request with these proxy settings.
-    if (proxiedDnsLeakFilter_ &&
-        !proxiedDnsLeakFilter_->mayConnect(requestProxySettings().isProxyEnabled())) {
+    if ((proxiedDnsLeakFilter_ && !proxiedDnsLeakFilter_->mayConnect(requestProxySettings().isProxyEnabled())) ||
+        !isFirewallDnsProtected()) {
         qCCritical(LOG_CONNECTION) << "DNS leak protection could not be set up, abort connection";
         connectStateController_->setDisconnectedState(DISCONNECTED_WITH_ERROR, ConnectError::kDnsLeakProtectionFailed);
         myIpManager_->getIP(1);
@@ -1565,7 +1567,7 @@ void Engine::onConnectionManagerConnected()
     // A proxied session is reported connected only with the connected DNS rules confirmed: until then
     // the not-connected ones are in place, which let Windscribe and excluded apps (Throne) reach the
     // adapters' DNS servers.
-    if (proxiedDnsLeakFilter_ && !proxiedDnsLeakFilter_->mayReportConnected()) {
+    if ((proxiedDnsLeakFilter_ && !proxiedDnsLeakFilter_->mayReportConnected()) || !isFirewallDnsProtected()) {
         qCCritical(LOG_CONNECTION) << "The connected DNS leak rules could not be installed; disconnecting";
         pendingDisconnectError_ = ConnectError::kDnsLeakProtectionFailed;
         connectionManager_->clickDisconnect(DISCONNECTED_WITH_ERROR);
@@ -3310,6 +3312,22 @@ void Engine::updateProxiedDnsLeakProtection(CONNECT_STATE state, DISCONNECT_REAS
     // hostnames itself, then goes through the proxy) and so do Exclusive-mode excluded apps such as
     // Throne; every other program is blocked from the adapters' resolvers and all local-network ones.
     proxiedDnsLeakFilter_->onConnectState(state, requestProxySettings().isProxyEnabled(), keepAfterSession);
+}
+
+bool Engine::isFirewallDnsProtected()
+{
+    if (!firewallController_ || !firewallController_->firewallActualState()) {
+        return true;
+    }
+    if (!firewallController_->isFirewallComplete()) {
+        // Not committed while incomplete: this sends it again.
+        updateFirewallSettings();
+    }
+    const bool isProtected = firewall_policy::mayProceedWithFirewall(true, firewallController_->isFirewallComplete());
+    if (!isProtected) {
+        qCCritical(LOG_BASIC) << "The firewall is on but not completely applied (DNS baseline); holding the connection";
+    }
+    return isProtected;
 }
 
 firewall_policy::DnsLeakFilterSendResult Engine::sendProxiedDnsLeakFilter(firewall_policy::DnsLeakFilter filter)

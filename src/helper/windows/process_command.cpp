@@ -327,7 +327,10 @@ void registerBaselineReadyCallback()
     isRegistered = true;
     DnsFirewall::instance().setBaselineReadyCallback([]() {
         std::lock_guard<std::mutex> guard(g_firewallOnMutex);
-        if (g_lanHeldRequest && FirewallFilter::instance().currentStatus()) {
+        // Rechecked here, under the lock: this may come from an earlier activation, and the firewall
+        // may have been turned off and on again since, with a baseline that failed this time.
+        if (scoped_permits::shouldRestoreLanPermit(g_lanHeldRequest.has_value(), FirewallFilter::instance().currentStatus(),
+                                                   DnsFirewall::instance().isBaselineInPlace())) {
             spdlog::info("DNS baseline in place; restoring the firewall's LAN permit");
             applyFirewallOn(*g_lanHeldRequest, false);
             g_lanHeldRequest.reset();
