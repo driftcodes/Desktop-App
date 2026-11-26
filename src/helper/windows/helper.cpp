@@ -59,27 +59,17 @@ bool Helper::onInit()
     FirewallFilter::instance(&fwpmWrapper_);
     Ipv6Firewall::instance(&fwpmWrapper_);
     SplitTunneling::instance(&fwpmWrapper_);
-    // A split-tunnel permit update (an excluded app or IP added or removed) that failed is retried.
-    DnsFirewall::instance().setPeriodicTask([]() { FirewallFilter::instance().retryPendingSplitTunnelUpdate(); });
+    // Retried periodically: a split-tunnel permit update (an excluded app or IP added or removed)
+    // that failed, the startup decision below while the firewall's state cannot be read, and a
+    // removal of the firewall that failed.
+    DnsFirewall::instance().setPeriodicTask([]() {
+        FirewallFilter::instance().retryPendingSplitTunnelUpdate();
+        retryPendingFirewallWork();
+    });
 
     setStatus(SERVICE_START_PENDING);
 
-    // Check if firewall on boot is enabled
-    if (!FirewallOnBootManager::instance().isEnabled()) {
-        spdlog::info("Firewall on boot is not enabled, turning off firewall");
-        FirewallFilter::instance().off();
-        DnsFirewall::instance().setBaselineEnabled(false);
-    } else if (FirewallFilter::instance().currentStatus()) {
-        // The firewall kept from before (Always On): so is its DNS baseline, if it is verifiably
-        // there; otherwise one is built, and if that fails the firewall's LAN permit is held back
-        // until the client's next firewallOn.
-        if (!DnsFirewall::instance().adoptBaselineAtStart()) {
-            spdlog::error("No DNS baseline at service start; holding the firewall's LAN permit");
-            startStartupLanHold();
-        }
-    } else {
-        DnsFirewall::instance().setBaselineEnabled(false);
-    }
+    applyFirewallStateAtStart(FirewallOnBootManager::instance().isEnabled());
 
     return true;
 }

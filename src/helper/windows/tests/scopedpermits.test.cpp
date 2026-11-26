@@ -837,7 +837,195 @@ void testSplitTunnelFollowsFirewallRebuilds()
     VERIFY(!fw.sync.isPending() && fw.sync.applied() == SplitState{});
 }
 
+void testPartialSublayerRemovalIsAborted()
+{
+    // The main firewall's sublayer with two filters (its LAN permit and its default block, say).
+    FakeWfp wfp;
+    wfp.begin();
+    const uint64_t lanPermit = wfp.add();
+    const uint64_t block = wfp.add();
+    wfp.commit();
+    bool isSublayerIn = true;
+
+    uint64_t failingId = block;
+    bool isListed = true;
+    const auto deleteById = [&](uint64_t id) {
+        if (id == failingId) {
+            return scoped_permits::DeleteResult::kFailed;
+        }
+        return wfp.remove(id) ? scoped_permits::DeleteResult::kDeleted : scoped_permits::DeleteResult::kNotFound;
+    };
+    bool isSublayerStaged = true;
+    const auto deleteSublayer = [&]() {
+        isSublayerStaged = false;
+        return scoped_permits::DeleteResult::kDeleted;
+    };
+    // As FirewallFilter::off() does: one transaction, committed only on a complete removal.
+    const auto off = [&]() {
+        wfp.begin();
+        isSublayerStaged = isSublayerIn;
+        const std::vector<uint64_t> listed(wfp.working.begin(), wfp.working.end());
+        if (scoped_permits::removeSublayerAndFilters(isListed, listed, deleteById, deleteSublayer)) {
+            wfp.commit();
+            isSublayerIn = isSublayerStaged;
+            return true;
+        }
+        wfp.abort();
+        return false;
+    };
+
+    // The LAN permit's deletion succeeds, the block's fails: nothing of it may be committed.
+    VERIFY(!off());
+    VERIFY(wfp.installed.count(lanPermit) == 1 && wfp.installed.count(block) == 1);
+    VERIFY(isSublayerIn);
+
+    // Filters that could not all be listed: not removed either.
+    failingId = 0;
+    isListed = false;
+    VERIFY(!off());
+    VERIFY(wfp.installed.size() == 2 && isSublayerIn);
+
+    // The retry goes through.
+    isListed = true;
+    VERIFY(off());
+    VERIFY(wfp.installed.empty() && !isSublayerIn);
+
+    // A sublayer that cannot be deleted is a failure; one already gone is not.
+    VERIFY(!scoped_permits::removeSublayerAndFilters(true, std::vector<uint64_t>{}, deleteById,
+                                                     []() { return scoped_permits::DeleteResult::kFailed; }));
+    VERIFY(scoped_permits::removeSublayerAndFilters(true, std::vector<uint64_t>{}, deleteById,
+                                                    []() { return scoped_permits::DeleteResult::kNotFound; }));
+}
+
+// process_command's startup decision and firewallOff, with the main firewall (Always On with Allow
+// LAN: its LAN permit in) and the DNS baseline's block reduced to flags.
+struct FakeHelperFirewallState {
+    scoped_permits::PendingFirewallWork work;
+    bool isFirewallOn = true;
+    bool isBaselineIn = true;
+    bool isAdopted = false;
+    std::vector<scoped_permits::FirewallStatus> statusReads;  // queued results; then the real state
+    int failNextOffs = 0;
+    int offAttempts = 0;
+    bool hasLeaked = false;  // the LAN permit was ever in force without the DNS block
+
+    scoped_permits::FirewallStatus readStatus()
+    {
+        if (!statusReads.empty()) {
+            const auto status = statusReads.front();
+            statusReads.erase(statusReads.begin());
+            return status;
+        }
+        return isFirewallOn ? scoped_permits::FirewallStatus::kOn : scoped_permits::FirewallStatus::kOff;
+    }
+    void run(scoped_permits::PendingFirewallWork::Action action)
+    {
+        using Action = scoped_permits::PendingFirewallWork::Action;
+        if (action == Action::kTurnOff) {
+            ++offAttempts;
+            bool isOff = true;
+            if (failNextOffs > 0) {
+                --failNextOffs;
+                isOff = false;  // aborted: the firewall stays whole
+            }
+            if (isOff) {
+                isFirewallOn = false;
+            }
+            action = work.onTurnedOff(isOff);
+        }
+        if (action == Action::kRemoveBaseline) {
+            isBaselineIn = false;
+        } else if (action == Action::kAdoptBaseline) {
+            isAdopted = true;
+        }
+        hasLeaked = hasLeaked || (isFirewallOn && !isBaselineIn);
+    }
+    void start(bool isOnBootEnabled) { run(work.atStart(isOnBootEnabled, readStatus())); }
+    void retry()
+    {
+        if (work.isPending()) {
+            run(work.retry(readStatus()));
+        }
+    }
+    void clientOff() { run(work.requestTurnOff()); }
+    void clientOn()
+    {
+        work.onFirewallOn();
+        isFirewallOn = true;
+        isBaselineIn = true;
+    }
+};
+
+void testAlwaysOnStartWithUnreadableStatusKeepsDnsBlock()
+{
+    // Saved Always On firewall with its LAN permit and a working DNS block; the first read fails.
+    FakeHelperFirewallState helper;
+    helper.statusReads = {scoped_permits::FirewallStatus::kUnknown, scoped_permits::FirewallStatus::kUnknown};
+    helper.start(true);
+    VERIFY(helper.isBaselineIn && helper.isFirewallOn && !helper.isAdopted);
+    VERIFY(helper.work.isPending());
+    helper.retry();  // still unreadable
+    VERIFY(helper.isBaselineIn && helper.work.isPending());
+    helper.retry();  // read: on, so the baseline is kept (adopted)
+    VERIFY(helper.isAdopted && helper.isBaselineIn);
+    VERIFY(!helper.work.isPending());
+    VERIFY(helper.offAttempts == 0);
+    VERIFY(!helper.hasLeaked);
+
+    // Unreadable, then read as really off: only then does the baseline go.
+    FakeHelperFirewallState off;
+    off.isFirewallOn = false;
+    off.statusReads = {scoped_permits::FirewallStatus::kUnknown};
+    off.start(true);
+    VERIFY(off.isBaselineIn && off.work.isPending());
+    off.retry();
+    VERIFY(!off.isBaselineIn && !off.work.isPending());
+
+    // The client's firewallOn meanwhile decides instead.
+    FakeHelperFirewallState client;
+    client.statusReads = {scoped_permits::FirewallStatus::kUnknown};
+    client.start(true);
+    client.clientOn();
+    VERIFY(!client.work.isPending());
+    client.retry();
+    VERIFY(!client.isAdopted && client.isBaselineIn && client.isFirewallOn);
+}
+
+void testFailedFirewallOffKeepsDnsBaseline()
+{
+    // The user turns the firewall off; one of its deletions fails, so off() aborts.
+    FakeHelperFirewallState helper;
+    helper.failNextOffs = 2;
+    helper.clientOff();
+    VERIFY(helper.isFirewallOn && helper.isBaselineIn);  // both stay, the firewall whole
+    VERIFY(helper.work.isPending());
+    helper.retry();
+    VERIFY(helper.isFirewallOn && helper.isBaselineIn && helper.work.isPending());
+    helper.retry();
+    VERIFY(!helper.isFirewallOn && !helper.isBaselineIn);
+    VERIFY(!helper.work.isPending() && helper.offAttempts == 3);
+    VERIFY(!helper.hasLeaked);
+
+    // A firewallOn while the removal is pending cancels it.
+    FakeHelperFirewallState again;
+    again.failNextOffs = 1;
+    again.clientOff();
+    again.clientOn();
+    again.retry();
+    VERIFY(again.isFirewallOn && again.isBaselineIn && again.offAttempts == 1);
+
+    // Service start with Always On disabled and a removal that fails: the same.
+    FakeHelperFirewallState boot;
+    boot.failNextOffs = 1;
+    boot.start(false);
+    VERIFY(boot.isFirewallOn && boot.isBaselineIn && boot.work.isPending());
+    boot.retry();
+    VERIFY(!boot.isFirewallOn && !boot.isBaselineIn && !boot.work.isPending());
+    VERIFY(!boot.hasLeaked);
+}
+
 } // namespace
+
 
 
 int main()
@@ -865,6 +1053,9 @@ int main()
     testWithdrawnFailedAdditionIsNotRetried();
     testFailedStatusQueryKeepsChangePending();
     testSplitTunnelFollowsFirewallRebuilds();
+    testPartialSublayerRemovalIsAborted();
+    testAlwaysOnStartWithUnreadableStatusKeepsDnsBlock();
+    testFailedFirewallOffKeepsDnsBaseline();
     if (g_failures == 0) {
         printf("All scoped permit tests passed.\n");
     }

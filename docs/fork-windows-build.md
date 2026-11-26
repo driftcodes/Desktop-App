@@ -179,6 +179,11 @@ Emergency Connect is unchanged and never uses the proxy.
   and the helper retries every few seconds with whatever the settings are by then. A later change
   includes the one that failed, and taking back a change that failed leaves nothing to retry. If the
   firewall's state cannot be read, the change stays pending instead of being treated as done.
+- **When the firewall's state cannot be read, or cannot be removed.** If the service cannot read the
+  firewall's state when it starts, it changes nothing: the saved Always On rules and their DNS block
+  stay, and it reads the state again every few seconds until it can decide. When the firewall is
+  turned off, all of its rules must go in one step. If one of them cannot be deleted, nothing is
+  removed, the DNS block stays, and the helper tries again.
 
 ### Reconnecting
 

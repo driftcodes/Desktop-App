@@ -19,6 +19,7 @@
 #include "firewallfilter.h"
 #include "fwpm_wrapper.h"
 #include "ipv6_firewall.h"
+#include "scoped_permit_plan.h"
 #include "split_tunneling/split_tunneling.h"
 
 #if defined(USE_SIGNATURE_CHECK)
@@ -29,6 +30,40 @@
 
 namespace Utils
 {
+
+namespace {
+// The ids of subLayerGUID's filters at layerKey; false if they could not all be listed.
+bool listFiltersForSublayer(HANDLE engineHandle, const GUID *subLayerGUID, GUID layerKey, std::vector<UINT64> &ids)
+{
+    FWPM_FILTER_ENUM_TEMPLATE0 enumTemplate;
+    ZeroMemory(&enumTemplate, sizeof(enumTemplate));
+    enumTemplate.layerKey = layerKey;
+    enumTemplate.actionMask = 0xFFFFFFFF;
+    HANDLE enumHandle;
+    DWORD dwRet = FwpmFilterCreateEnumHandle0(engineHandle, &enumTemplate, &enumHandle);
+    if (dwRet != ERROR_SUCCESS) {
+        spdlog::error("listFiltersForSublayer - FwpmFilterCreateEnumHandle0 failed: {}", dwRet);
+        return false;
+    }
+    FWPM_FILTER0 **filters;
+    UINT32 numFiltersReturned;
+    while ((dwRet = FwpmFilterEnum0(engineHandle, enumHandle, INFINITE, &filters, &numFiltersReturned)) == ERROR_SUCCESS &&
+           numFiltersReturned > 0) {
+        for (UINT32 i = 0; i < numFiltersReturned; ++i) {
+            if (filters[i]->subLayerKey == *subLayerGUID) {
+                ids.push_back(filters[i]->filterId);
+            }
+        }
+        FwpmFreeMemory0((void **)&filters);
+    }
+    FwpmFilterDestroyEnumHandle0(engineHandle, enumHandle);
+    if (dwRet != ERROR_SUCCESS) {
+        spdlog::error("listFiltersForSublayer - FwpmFilterEnum0 failed: {}", dwRet);
+        return false;
+    }
+    return true;
+}
+} // namespace
 
 bool deleteSublayerAndAllFilters(HANDLE engineHandle, const GUID *subLayerGUID)
 {
@@ -49,25 +84,44 @@ bool deleteSublayerAndAllFilters(HANDLE engineHandle, const GUID *subLayerGUID)
         return false;
     }
 
-    if (!deleteAllFiltersForSublayer(engineHandle, subLayerGUID, FWPM_LAYER_ALE_AUTH_CONNECT_V4)) {
-        spdlog::error("deleteSublayerAndAllFilters - deleteAllFiltersForSublayer failed for layer ALE_AUTH_CONNECT_V4");
+    // false on a partial removal: the caller aborts its transaction (WFP would otherwise commit the
+    // deletions that did succeed).
+    bool areListed = true;
+    std::vector<UINT64> ids;
+    const GUID layers[] = {FWPM_LAYER_ALE_AUTH_CONNECT_V4, FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4,
+                           FWPM_LAYER_ALE_AUTH_CONNECT_V6, FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6};
+    for (const GUID &layer : layers) {
+        if (!listFiltersForSublayer(engineHandle, subLayerGUID, layer, ids)) {
+            areListed = false;
+        }
     }
-    if (!deleteAllFiltersForSublayer(engineHandle, subLayerGUID, FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4)) {
-        spdlog::error("deleteSublayerAndAllFilters - deleteAllFiltersForSublayer failed for layer ALE_AUTH_RECV_ACCEPT_V4");
+    const auto deleteById = [&](UINT64 id) {
+        const DWORD ret = FwpmFilterDeleteById0(engineHandle, id);
+        if (ret == ERROR_SUCCESS) {
+            return scoped_permits::DeleteResult::kDeleted;
+        }
+        if (ret == FWP_E_FILTER_NOT_FOUND) {
+            return scoped_permits::DeleteResult::kNotFound;
+        }
+        spdlog::error("deleteSublayerAndAllFilters - FwpmFilterDeleteById0 failed for filter {}: {}", id, ret);
+        return scoped_permits::DeleteResult::kFailed;
+    };
+    const auto deleteSublayer = [&]() {
+        const DWORD ret = FwpmSubLayerDeleteByKey0(engineHandle, subLayerGUID);
+        if (ret == ERROR_SUCCESS) {
+            return scoped_permits::DeleteResult::kDeleted;
+        }
+        if (ret == FWP_E_SUBLAYER_NOT_FOUND) {
+            return scoped_permits::DeleteResult::kNotFound;
+        }
+        spdlog::error("deleteSublayerAndAllFilters - FwpmSubLayerDeleteByKey0 failed: {}", ret);
+        return scoped_permits::DeleteResult::kFailed;
+    };
+    const bool isRemoved = scoped_permits::removeSublayerAndFilters(areListed, ids, deleteById, deleteSublayer);
+    if (!isRemoved) {
+        spdlog::error("deleteSublayerAndAllFilters - the sublayer and its {} filter(s) could not all be removed", ids.size());
     }
-    if (!deleteAllFiltersForSublayer(engineHandle, subLayerGUID, FWPM_LAYER_ALE_AUTH_CONNECT_V6)) {
-        spdlog::error("deleteSublayerAndAllFilters - deleteAllFiltersForSublayer failed for layer ALE_AUTH_CONNECT_V6");
-    }
-    if (!deleteAllFiltersForSublayer(engineHandle, subLayerGUID, FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6)) {
-        spdlog::error("deleteSublayerAndAllFilters - deleteAllFiltersForSublayer failed for layer ALE_AUTH_RECV_ACCEPT_V6");
-    }
-
-    result = FwpmSubLayerDeleteByKey0(engineHandle, subLayerGUID);
-    if (result != ERROR_SUCCESS) {
-        spdlog::error("deleteSublayerAndAllFilters - FwpmSubLayerDeleteByKey0 failed: {}", result);
-    }
-
-    return true;
+    return isRemoved;
 }
 
 bool deleteAllFiltersForSublayer(HANDLE engineHandle, const GUID *subLayerGUID, GUID layerKey, bool *allDeleted)
@@ -1016,9 +1070,13 @@ void disableFirewall()
             Ipv6Firewall::instance(&fwpmWrapper).enableIPv6();
             DnsFirewall::instance(&fwpmWrapper).disable(DnsLeakFilterOwner::kAny);
             DnsFirewall::instance(&fwpmWrapper).setBaselineEnabled(false);
-            FirewallFilter::instance(&fwpmWrapper).off();
+            const bool isOff = FirewallFilter::instance(&fwpmWrapper).off();
             SplitTunneling::removeAllFilters(fwpmWrapper);
-            printf(WS_PRODUCT_NAME " firewall deleted.\n");
+            if (isOff) {
+                printf(WS_PRODUCT_NAME " firewall deleted.\n");
+            } else {
+                printf("Some " WS_PRODUCT_NAME " firewall rules could not be deleted; please run this again.\n");
+            }
         } else {
             printf("Failed to initialize access to the Windows firewall manager.\n");
         }

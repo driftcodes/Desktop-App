@@ -309,8 +309,12 @@ struct FirewallOnRequest
     bool allowLanTraffic;
     bool isCustomConfig;
 };
-std::mutex g_firewallOnMutex;
+// Recursive: the startup and retry paths below call startStartupLanHold() with it held.
+std::recursive_mutex g_firewallOnMutex;
 std::optional<FirewallOnRequest> g_lanHeldRequest;
+// The startup decision while the firewall's state could not be read, and a removal of the main
+// firewall that failed; retried by retryPendingFirewallWork().
+scoped_permits::PendingFirewallWork g_pendingFirewallWork;
 // Service start without a DNS baseline: the firewall kept from before must lose its LAN permit until
 // the client's next firewallOn/Off (which clear this).
 bool g_isStartupLanHoldPending = false;
@@ -329,7 +333,7 @@ void registerBaselineReadyCallback()
     }
     isRegistered = true;
     DnsFirewall::instance().setBaselineReadyCallback([]() {
-        std::lock_guard<std::mutex> guard(g_firewallOnMutex);
+        std::lock_guard<std::recursive_mutex> guard(g_firewallOnMutex);
         // Rechecked here, under the lock: this may come from an earlier activation, and the firewall
         // may have been turned off and on again since, with a baseline that failed this time.
         if (scoped_permits::shouldRestoreLanPermit(g_lanHeldRequest.has_value(), FirewallFilter::instance().currentStatus(),
@@ -341,13 +345,60 @@ void registerBaselineReadyCallback()
     });
 }
 
+// With g_firewallOnMutex held.
+void runFirewallAction(scoped_permits::PendingFirewallWork::Action action)
+{
+    using Action = scoped_permits::PendingFirewallWork::Action;
+    if (action == Action::kTurnOff) {
+        const bool isOff = FirewallFilter::instance().off();
+        if (!isOff) {
+            spdlog::error("The firewall could not be removed completely; it stays whole, and so does its DNS baseline; retrying");
+        }
+        action = g_pendingFirewallWork.onTurnedOff(isOff);
+    }
+    if (action == Action::kRemoveBaseline) {
+        DnsFirewall::instance().setBaselineEnabled(false);
+    } else if (action == Action::kAdoptBaseline) {
+        // The firewall kept from before (Always On): so is its DNS baseline, if it is verifiably
+        // there; otherwise one is built, and if that fails the firewall's LAN permit is held back
+        // until the client's next firewallOn.
+        if (!DnsFirewall::instance().adoptBaselineAtStart()) {
+            spdlog::error("No DNS baseline at service start; holding the firewall's LAN permit");
+            startStartupLanHold();
+        }
+    }
+}
+
 } // namespace
+
+void applyFirewallStateAtStart(bool isFirewallOnBootEnabled)
+{
+    std::lock_guard<std::recursive_mutex> guard(g_firewallOnMutex);
+    const scoped_permits::FirewallStatus status = FirewallFilter::instance().firewallStatus();
+    if (!isFirewallOnBootEnabled) {
+        spdlog::info("Firewall on boot is not enabled, turning off firewall");
+    } else if (status == scoped_permits::FirewallStatus::kUnknown) {
+        // Not read as "off": that would remove the DNS baseline while the saved firewall, LAN
+        // permit included, may still be in force.
+        spdlog::error("Service start: the firewall's state could not be read; the saved rules stay, retrying");
+    }
+    runFirewallAction(g_pendingFirewallWork.atStart(isFirewallOnBootEnabled, status));
+}
+
+void retryPendingFirewallWork()
+{
+    std::lock_guard<std::recursive_mutex> guard(g_firewallOnMutex);
+    if (!g_pendingFirewallWork.isPending()) {
+        return;
+    }
+    runFirewallAction(g_pendingFirewallWork.retry(FirewallFilter::instance().firewallStatus()));
+}
 
 bool retryStartupLanHold()
 {
     // Under the same lock as firewallOn/Off, and only while still wanted: a firewallOn that restored
     // the LAN permit in the meantime must not have it removed by a late retry.
-    std::lock_guard<std::mutex> guard(g_firewallOnMutex);
+    std::lock_guard<std::recursive_mutex> guard(g_firewallOnMutex);
     if (!g_isStartupLanHoldPending) {
         return true;  // nothing (left) to do
     }
@@ -361,7 +412,7 @@ bool retryStartupLanHold()
 void startStartupLanHold()
 {
     {
-        std::lock_guard<std::mutex> guard(g_firewallOnMutex);
+        std::lock_guard<std::recursive_mutex> guard(g_firewallOnMutex);
         g_isStartupLanHoldPending = true;
     }
     if (!retryStartupLanHold()) {
@@ -404,9 +455,10 @@ std::string firewallOn(const std::string &pars)
         // The scoped permits need Windscribe's programs; look again if none were found at start.
         SplitTunneling::instance().redetectWindscribeAppsIfMissing();
     }
-    std::lock_guard<std::mutex> guard(g_firewallOnMutex);
+    std::lock_guard<std::recursive_mutex> guard(g_firewallOnMutex);
     registerBaselineReadyCallback();
     g_isStartupLanHoldPending = false;
+    g_pendingFirewallWork.onFirewallOn();
     DnsFirewall::instance().clearPendingLanHold();  // this request rebuilds the firewall
     bool prevStatus = FirewallFilter::instance().currentStatus();
     // The DNS baseline follows the main firewall and goes in first: no program but Windscribe's and
@@ -436,18 +488,20 @@ std::string firewallOff(const std::string &pars)
 {
     WS_DEBUG_TRACE_SCOPE("firewallOff");
 
-    std::lock_guard<std::mutex> guard(g_firewallOnMutex);
+    std::lock_guard<std::recursive_mutex> guard(g_firewallOnMutex);
     g_lanHeldRequest.reset();
     g_isStartupLanHoldPending = false;
     DnsFirewall::instance().clearPendingLanHold();
-    bool prevStatus = FirewallFilter::instance().currentStatus();
-    FirewallFilter::instance().off();
-    DnsFirewall::instance().setBaselineEnabled(false);
-    if (prevStatus) {
+    const scoped_permits::FirewallStatus prevStatus = FirewallFilter::instance().firewallStatus();
+    // The DNS baseline goes only once the main firewall is off; a removal that failed leaves both
+    // (the firewall whole) and is retried.
+    runFirewallAction(g_pendingFirewallWork.requestTurnOff());
+    const bool isOff = !g_pendingFirewallWork.isPending();
+    if (prevStatus != scoped_permits::FirewallStatus::kOff) {
         SplitTunneling::instance().updateState();
     }
-    spdlog::info("firewallOff");
-    return std::string();
+    spdlog::info("firewallOff: off = {}", isOff);
+    return serializeResult(isOff);
 }
 
 std::string firewallActualState(const std::string &pars)

@@ -43,6 +43,11 @@ std::string enableDnsLeaksProtection(const std::string &pars);
 // firewall's monitor until it works or the client's firewallOn/Off takes over.
 void startStartupLanHold();
 bool retryStartupLanHold();
+// Service start: keeps, removes or turns off the firewall kept from before. While the firewall's
+// state cannot be read nothing is touched (the saved DNS baseline stays); retried, like a removal
+// that failed, by retryPendingFirewallWork() (periodic) until it works or the client takes over.
+void applyFirewallStateAtStart(bool isFirewallOnBootEnabled);
+void retryPendingFirewallWork();
 std::string disableDnsLeaksProtection(const std::string &pars);
 std::string reinstallWanIkev2(const std::string &pars);
 std::string enableWanIkev2(const std::string &pars);

@@ -38,8 +38,13 @@ bool FirewallFilter::on(const wchar_t *connectingIp, const std::vector<std::wstr
     // commits (Windows keeps the old filters then).
     scoped_permits::FilterIdsSnapshot<std::vector<UINT64>> ids({&filterIdsApps_, &filterIdsSplitRoutingIps_});
 
-    if (currentStatusImpl(hEngine) == true) {
-        offImpl(hEngine);
+    if (currentStatusImpl(hEngine) == true && !offImpl(hEngine)) {
+        // Some of the old rules would stay in force beside the new ones: commit nothing.
+        spdlog::error("FirewallFilter::on(), the rules in place could not all be removed; aborted, they stay");
+        fwpmWrapper_.abortTransaction();
+        ids.rollback();
+        fwpmWrapper_.unlock();
+        return false;
     }
 
     FWPM_SUBLAYER0 subLayer = {0};
@@ -156,15 +161,19 @@ bool FirewallFilter::holdLanPermit()
     return isHeld;
 }
 
-void FirewallFilter::off()
+bool FirewallFilter::off()
 {
     std::lock_guard<std::recursive_mutex> guard(mutex_);
 
     HANDLE hEngine = fwpmWrapper_.getHandleAndLock();
-    if (runTransaction([&]() { offImpl(hEngine); return true; })) {
+    // Committed only if every filter and the sublayer went: a partial removal is aborted, so the
+    // firewall stays whole (and its recorded ids with it) and the caller keeps the DNS baseline.
+    const bool isOff = runTransaction([&]() { return offImpl(hEngine); });
+    if (isOff) {
         splitTunnel_.onFirewallOff();
     }
     fwpmWrapper_.unlock();
+    return isOff;
 }
 
 bool FirewallFilter::runTransaction(const std::function<bool()> &body)
@@ -209,6 +218,15 @@ bool FirewallFilter::currentStatus()
     return bRet;
 }
 
+scoped_permits::FirewallStatus FirewallFilter::firewallStatus()
+{
+    std::lock_guard<std::recursive_mutex> guard(mutex_);
+    HANDLE hEngine = fwpmWrapper_.getHandleAndLock();
+    const scoped_permits::FirewallStatus status = firewallStatusImpl(hEngine);
+    fwpmWrapper_.unlock();
+    return status;
+}
+
 bool FirewallFilter::currentStatusImpl(HANDLE engineHandle)
 {
     return firewallStatusImpl(engineHandle) == scoped_permits::FirewallStatus::kOn;
@@ -229,15 +247,17 @@ scoped_permits::FirewallStatus FirewallFilter::firewallStatusImpl(HANDLE engineH
     return scoped_permits::FirewallStatus::kUnknown;
 }
 
-void FirewallFilter::offImpl(HANDLE engineHandle)
+bool FirewallFilter::offImpl(HANDLE engineHandle)
 {
-    if (Utils::deleteSublayerAndAllFilters(engineHandle, &subLayerGUID_)) {
-        spdlog::info("FirewallFilter::offImpl(), all filters deleted");
-    } else {
-        spdlog::error("FirewallFilter::offImpl(), failed delete filters");
-    }
+    // Cleared either way: on failure the caller aborts its transaction and puts the ids back.
     filterIdsApps_.clear();
     filterIdsSplitRoutingIps_.clear();
+    if (Utils::deleteSublayerAndAllFilters(engineHandle, &subLayerGUID_)) {
+        spdlog::info("FirewallFilter::offImpl(), all filters deleted");
+        return true;
+    }
+    spdlog::error("FirewallFilter::offImpl(), the filters could not all be deleted");
+    return false;
 }
 
 void FirewallFilter::syncSplitTunnelFilters()

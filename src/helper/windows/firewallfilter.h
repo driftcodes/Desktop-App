@@ -30,7 +30,9 @@ public:
     // while the DNS baseline that keeps DNS off the LAN is not in place yet.
     bool on(const wchar_t *connectingIp, const std::vector<std::wstring> &ips, const std::vector<std::wstring> &windscribeOnlyIps,
             bool bAllowLocalTraffic, bool bIsCustomConfig, bool bHoldLanPermit = false);
-    void off();
+    // false if the firewall could not be removed completely: nothing changed then (aborted), it stays
+    // whole.
+    bool off();
     // Removes the LAN permits of the firewall in place (kept from before, at service start) and
     // blocks DNS to IPv6 link-local: while no DNS baseline is in place they would let any program
     // query a router's DNS.
@@ -38,7 +40,10 @@ public:
     // Retries bringing the split-tunnel filters (app and IP exclusions) in line with the latest
     // settings, after an update that failed or could not read the firewall's state; called periodically.
     void retryPendingSplitTunnelUpdate();
+    // true only if the firewall is known to be on (see firewallStatus()).
     bool currentStatus();
+    // On, off, or unknown (the state could not be read).
+    scoped_permits::FirewallStatus firewallStatus();
 
     // split tunnelling parameters: each changes its part of the latest request, then the filters are
     // rebuilt from the whole request (see scoped_permits::SplitTunnelFilterSync)
@@ -65,7 +70,7 @@ private:
 
     bool currentStatusImpl(HANDLE engineHandle);
     scoped_permits::FirewallStatus firewallStatusImpl(HANDLE engineHandle);
-    void offImpl(HANDLE engineHandle);
+    bool offImpl(HANDLE engineHandle);
 
     bool addFilters(HANDLE engineHandle, const wchar_t *connectingIp, const std::vector<std::wstring> &ips,
                     const std::vector<std::wstring> &windscribeOnlyIps, bool bAllowLocalTraffic, bool bIsCustomConfig,

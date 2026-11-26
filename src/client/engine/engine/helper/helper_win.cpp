@@ -203,7 +203,13 @@ bool Helper_win::firewallOn(const QString &connectingIp, const QStringList &ips,
 
 void Helper_win::firewallOff()
 {
-    sendCommand(HelperCommand::firewallOff);
+    auto result = sendCommand(HelperCommand::firewallOff);
+    bool isOff = true;
+    deserializeAnswer(result, isOff);
+    if (!isOff) {
+        // The helper keeps the firewall whole (and its DNS baseline) and retries the removal.
+        qCCritical(LOG_BASIC) << "firewallOff: the helper could not remove the firewall completely; it retries";
+    }
 }
 
 bool Helper_win::firewallActualState()

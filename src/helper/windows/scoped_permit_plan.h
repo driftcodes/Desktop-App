@@ -316,6 +316,23 @@ inline bool deleteRecordedFilters(const std::vector<Id> &ids, DeleteById deleteB
     return isEveryOneGone;
 }
 
+// Removing a sublayer with all its filters (Utils::deleteSublayerAndAllFilters), inside the caller's
+// transaction: only if every filter was listed and deleted (or already gone) and then the sublayer
+// itself. WFP commits whatever operations did succeed, so a caller that commits after a partial
+// removal would leave some of the rules in force while believing them gone: on false it aborts.
+template <typename Id, typename DeleteById, typename DeleteSublayer>
+inline bool removeSublayerAndFilters(bool areFiltersListed, const std::vector<Id> &filterIds, DeleteById deleteById,
+                                     DeleteSublayer deleteSublayer)
+{
+    if (!areFiltersListed) {
+        return false;  // a filter may have been missed
+    }
+    if (!deleteRecordedFilters(filterIds, deleteById)) {
+        return false;  // the sublayer cannot go while one is left
+    }
+    return deleteSublayer() != DeleteResult::kFailed;
+}
+
 // firewallOn with the DNS baseline: the baseline goes in first. Without it in place the main firewall
 // is turned on without its LAN permit (so the LAN DNS path stays closed), the request counts as
 // incomplete for the client, and the LAN permit is added once the baseline is in.
@@ -589,6 +606,84 @@ private:
     State applied_ {};
     bool isDirty_ = false;               // the filters in place are incomplete
     bool isWaitingForFirewall_ = false;  // the firewall is off: nothing to retry until it is rebuilt
+};
+
+// The helper's main firewall work that waits for a retry (process_command.cpp). The DNS baseline
+// goes only once the main firewall is known to be off: with the firewall (and its LAN permit) still
+// in force, removing it would let any program reach a router's DNS.
+//  - Service start while the firewall's state cannot be read: nothing is touched (the saved firewall
+//    and DNS baseline stay) until a read succeeds.
+//  - A removal of the main firewall that failed (firewallOff, or service start with Always On
+//    disabled): the firewall and the baseline stay, and the removal is retried.
+// A firewallOn or firewallOff from the client decides afresh.
+class PendingFirewallWork
+{
+public:
+    enum class Action {
+        kNone,            // nothing now (keep what is installed)
+        kTurnOff,         // remove the main firewall, then report it with onTurnedOff()
+        kAdoptBaseline,   // the firewall kept from before: keep (or build) its DNS baseline
+        kRemoveBaseline   // the main firewall is off: the DNS baseline goes too
+    };
+
+    Action atStart(bool isOnBootEnabled, FirewallStatus status)
+    {
+        if (!isOnBootEnabled) {
+            return requestTurnOff();
+        }
+        return decide(status);
+    }
+    // The client's firewallOff.
+    Action requestTurnOff()
+    {
+        isDecisionPending_ = false;
+        isTurnOffPending_ = true;
+        return Action::kTurnOff;
+    }
+    // The result of a kTurnOff: the baseline goes only with the main firewall.
+    Action onTurnedOff(bool isOff)
+    {
+        if (!isOff) {
+            return Action::kNone;  // retried
+        }
+        isTurnOffPending_ = false;
+        return Action::kRemoveBaseline;
+    }
+    // The client's firewallOn: it rebuilds everything.
+    void onFirewallOn()
+    {
+        isDecisionPending_ = false;
+        isTurnOffPending_ = false;
+    }
+    // The periodic retry, with the firewall's state read now.
+    Action retry(FirewallStatus status)
+    {
+        if (isTurnOffPending_) {
+            return Action::kTurnOff;
+        }
+        if (isDecisionPending_) {
+            return decide(status);
+        }
+        return Action::kNone;
+    }
+    bool isPending() const { return isTurnOffPending_ || isDecisionPending_; }
+
+private:
+    Action decide(FirewallStatus status)
+    {
+        isDecisionPending_ = status == FirewallStatus::kUnknown;
+        switch (status) {
+        case FirewallStatus::kOn:
+            return Action::kAdoptBaseline;
+        case FirewallStatus::kOff:
+            return Action::kRemoveBaseline;
+        default:
+            return Action::kNone;
+        }
+    }
+
+    bool isDecisionPending_ = false;
+    bool isTurnOffPending_ = false;
 };
 
 } // namespace scoped_permits

@@ -820,6 +820,7 @@ void DnsFirewall::setPeriodicTask(std::function<void()> task)
 {
     std::lock_guard<std::recursive_mutex> guard(mutex_);
     periodicTask_ = std::move(task);
+    startMonitor();  // the task runs from the monitor, which may not be started otherwise
 }
 
 bool DnsFirewall::getDnsServers(std::set<types::IpAddress> &dnsServers)

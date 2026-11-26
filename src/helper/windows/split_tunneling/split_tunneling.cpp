@@ -238,6 +238,10 @@ bool SplitTunneling::updateState()
     // matches the previous Ip4AddressAndMask behaviour for empty/invalid input.
     DWORD localIp = connectStatus_.defaultAdapter.adapterIp.ipv4NetworkOrder();
     bool isSplitTunnelActive = connectStatus_.isConnected && isSplitTunnelEnabled_;
+    // Read once, three-way: a state that could not be read counts as on, so Throne's requested
+    // exclusions are not withdrawn because of a failed query; FirewallFilter keeps them pending until
+    // the state can be read (and does nothing with them if the firewall turns out to be off).
+    const bool isFirewallPossiblyOn = FirewallFilter::instance().firewallStatus() != scoped_permits::FirewallStatus::kOff;
 
     // Exclusive mode, VPN session in progress but not connected (connecting, reconnecting,
     // disconnecting). Tunnel routes can appear before isConnected arrives or still be there after
@@ -259,7 +263,7 @@ bool SplitTunneling::updateState()
         }
 
         // Same firewall/hostname handling as the disconnected state below.
-        if (connectStatus_.defaultAdapter.ifIndex != 0 && FirewallFilter::instance().currentStatus()) {
+        if (connectStatus_.defaultAdapter.ifIndex != 0 && isFirewallPossiblyOn) {
             hostnamesManager_.enable(connectStatus_.defaultAdapter.gatewayIp,
                                      connectStatus_.defaultAdapter.gatewayIpV6,
                                      connectStatus_.defaultAdapter.ifIndex);
@@ -281,7 +285,7 @@ bool SplitTunneling::updateState()
         }
     } else if (// Allow excluded traffic to bypass firewall even when not connected
                !connectStatus_.isConnected && isSplitTunnelEnabled_ && isExclude_
-        && connectStatus_.defaultAdapter.ifIndex != 0 && FirewallFilter::instance().currentStatus())
+        && connectStatus_.defaultAdapter.ifIndex != 0 && isFirewallPossiblyOn)
     {
         hostnamesManager_.enable(connectStatus_.defaultAdapter.gatewayIp,
                                  connectStatus_.defaultAdapter.gatewayIpV6,
