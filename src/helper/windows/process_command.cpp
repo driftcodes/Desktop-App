@@ -5,6 +5,8 @@
 #include <codecvt>
 #include <filesystem>
 #include <locale>
+#include <mutex>
+#include <optional>
 #include <spdlog/spdlog.h>
 #include <sstream>
 
@@ -296,6 +298,45 @@ std::string getWireGuardStatus(const std::string &pars)
     return serializeResult(success, lastHandshake, txBytes, rxBytes);
 }
 
+namespace {
+
+// A firewallOn applied without its LAN permit while the DNS baseline was not in place.
+struct FirewallOnRequest
+{
+    std::wstring connectingIp;
+    std::vector<std::wstring> ips;
+    std::vector<std::wstring> windscribeOnlyIps;
+    bool allowLanTraffic;
+    bool isCustomConfig;
+};
+std::mutex g_firewallOnMutex;
+std::optional<FirewallOnRequest> g_lanHeldRequest;
+
+bool applyFirewallOn(const FirewallOnRequest &request, bool holdLanPermit)
+{
+    return FirewallFilter::instance().on(request.connectingIp.c_str(), request.ips, request.windscribeOnlyIps,
+                                         request.allowLanTraffic, request.isCustomConfig, holdLanPermit);
+}
+
+void registerBaselineReadyCallback()
+{
+    static bool isRegistered = false;
+    if (isRegistered) {
+        return;
+    }
+    isRegistered = true;
+    DnsFirewall::instance().setBaselineReadyCallback([]() {
+        std::lock_guard<std::mutex> guard(g_firewallOnMutex);
+        if (g_lanHeldRequest && FirewallFilter::instance().currentStatus()) {
+            spdlog::info("DNS baseline in place; restoring the firewall's LAN permit");
+            applyFirewallOn(*g_lanHeldRequest, false);
+            g_lanHeldRequest.reset();
+        }
+    });
+}
+
+} // namespace
+
 std::string firewallOn(const std::string &pars)
 {
     WS_DEBUG_TRACE_SCOPE("firewallOn");
@@ -330,23 +371,38 @@ std::string firewallOn(const std::string &pars)
         // The scoped permits need Windscribe's programs; look again if none were found at start.
         SplitTunneling::instance().redetectWindscribeAppsIfMissing();
     }
+    std::lock_guard<std::mutex> guard(g_firewallOnMutex);
+    registerBaselineReadyCallback();
     bool prevStatus = FirewallFilter::instance().currentStatus();
-    const bool isComplete = FirewallFilter::instance().on(connectingIp.c_str(), ips, windscribeOnlyIps, bAllowLanTraffic, bIsCustomConfig);
-    // The DNS baseline follows the main firewall: no program but Windscribe's and excluded apps sends
-    // DNS out of a physical adapter while it is on, whatever the LAN permit allows.
-    DnsFirewall::instance().setBaselineEnabled(true);
+    // The DNS baseline follows the main firewall and goes in first: no program but Windscribe's and
+    // excluded apps sends DNS outside the tunnel while it is on, whatever the LAN permit allows.
+    // Without it in place the firewall goes on without its LAN permit (so the LAN DNS path stays
+    // closed) until the baseline gets in, and the request is reported as incomplete.
+    const bool isBaselineInPlace = DnsFirewall::instance().setBaselineEnabled(true);
+    FirewallOnRequest request{connectingIp, ips, windscribeOnlyIps, bAllowLanTraffic, bIsCustomConfig};
+    const bool isFirewallComplete = applyFirewallOn(request, !isBaselineInPlace);
+    const auto plan = scoped_permits::planFirewallOn(isBaselineInPlace, isFirewallComplete);
+    if (plan.holdLanPermit) {
+        g_lanHeldRequest = request;
+        spdlog::error("firewallOn: DNS baseline not in place; LAN permit held back until it is");
+    } else {
+        g_lanHeldRequest.reset();
+    }
     if (!prevStatus) {
         SplitTunneling::instance().updateState();
     }
-    spdlog::info("firewallOn: allowLanTraffic = {}, isCustomConfig = {}, complete = {}", bAllowLanTraffic, bIsCustomConfig, isComplete);
-    // false: the firewall is on but some requested permits are missing; the client reports it.
-    return serializeResult(isComplete);
+    spdlog::info("firewallOn: allowLanTraffic = {}, isCustomConfig = {}, complete = {}", bAllowLanTraffic, bIsCustomConfig, plan.isComplete);
+    // false: the firewall is on but some requested permits (or the DNS baseline) are missing; the
+    // client reports it and sends it again.
+    return serializeResult(plan.isComplete);
 }
 
 std::string firewallOff(const std::string &pars)
 {
     WS_DEBUG_TRACE_SCOPE("firewallOff");
 
+    std::lock_guard<std::mutex> guard(g_firewallOnMutex);
+    g_lanHeldRequest.reset();
     bool prevStatus = FirewallFilter::instance().currentStatus();
     FirewallFilter::instance().off();
     DnsFirewall::instance().setBaselineEnabled(false);

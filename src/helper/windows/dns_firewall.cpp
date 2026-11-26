@@ -147,24 +147,25 @@ public:
 
     bool add(const scoped_permits::BaselineRule &rule) override
     {
-        // Block 6, programs' permit 7, address permit 8: the highest matching one wins in this
-        // sublayer. Port 53, UDP and TCP, on this adapter only.
-        NET_LUID luid;
-        luid.Value = rule.interfaceLuid;
+        // Port 53, UDP and TCP. Weights from scoped_permits::baselineWeight: the highest matching
+        // filter wins in this sublayer.
         using scoped_permits::BaselineAction;
         const FWP_ACTION_TYPE action = rule.action == BaselineAction::kBlock ? FWP_ACTION_BLOCK : FWP_ACTION_PERMIT;
-        const UINT8 weight = rule.action == BaselineAction::kBlock ? 6 : (rule.action == BaselineAction::kPermitApps ? 7 : 8);
+        const UINT8 weight = scoped_permits::baselineWeight(rule.action);
         AppsIds *apps = rule.action == BaselineAction::kPermitApps ? &permittedApps_ : nullptr;
+        NET_LUID luid;
+        luid.Value = rule.interfaceLuid;
+        PNET_LUID pluid = rule.interfaceLuid != 0 ? &luid : nullptr;
         std::vector<types::IpAddressRange> addr;
-        if (rule.action == BaselineAction::kPermitAddress) {
-            addr.push_back(types::IpAddressRange(rule.address, rule.address.isV4() ? 32 : 128));
+        if (rule.range.isValid()) {
+            addr.push_back(rule.range);
         }
         const std::vector<types::IpAddressRange> *range = addr.empty() ? nullptr : &addr;
         const bool ret = rule.isV6
-            ? Utils::addFilterV6(engine_, nullptr, action, weight, subLayer_, (wchar_t*)FIREWALL_SUBLAYER_DNS_BASELINE_NAMEW, &luid, range, 0, 53, apps, true)
-            : Utils::addFilterV4(engine_, nullptr, action, weight, subLayer_, (wchar_t*)FIREWALL_SUBLAYER_DNS_BASELINE_NAMEW, &luid, range, 0, 53, apps, true);
+            ? Utils::addFilterV6(engine_, nullptr, action, weight, subLayer_, (wchar_t*)FIREWALL_SUBLAYER_DNS_BASELINE_NAMEW, pluid, range, 0, 53, apps, rule.isPersistent)
+            : Utils::addFilterV4(engine_, nullptr, action, weight, subLayer_, (wchar_t*)FIREWALL_SUBLAYER_DNS_BASELINE_NAMEW, pluid, range, 0, 53, apps, rule.isPersistent);
         if (!ret) {
-            spdlog::error("Could not add DNS baseline filter (action {}, v6 {}) for interface {}",
+            spdlog::error("Could not add DNS baseline filter (action {}, v6 {}, interface {})",
                           static_cast<int>(rule.action), rule.isV6, rule.interfaceLuid);
         }
         return ret;
@@ -327,7 +328,7 @@ std::set<types::IpAddress> DnsFirewall::baselinePermittedAddresses() const
     return {};
 }
 
-void DnsFirewall::setBaselineEnabled(bool isEnabled)
+bool DnsFirewall::setBaselineEnabled(bool isEnabled)
 {
     std::lock_guard<std::recursive_mutex> guard(mutex_);
     if (isEnabled) {
@@ -337,14 +338,21 @@ void DnsFirewall::setBaselineEnabled(bool isEnabled)
         }
         startMonitor();
         updateBaselineIfNeeded();
-    } else {
-        isBaselineEnabled_ = false;
-        isWaitingForExcludedApps_ = false;
-        if (!removeBaselineImpl()) {
-            isBaselineDirty_ = true;  // the monitor retries the removal
-            startMonitor();
-        }
+        return isBaselineInPlace_;
     }
+    isBaselineEnabled_ = false;
+    isWaitingForExcludedApps_ = false;
+    if (!removeBaselineImpl()) {
+        isBaselineDirty_ = true;  // the monitor retries the removal
+        startMonitor();
+    }
+    return true;
+}
+
+void DnsFirewall::setBaselineReadyCallback(std::function<void()> callback)
+{
+    std::lock_guard<std::recursive_mutex> guard(mutex_);
+    baselineReadyCallback_ = std::move(callback);
 }
 
 void DnsFirewall::adoptBaselineAtStart()
@@ -358,11 +366,21 @@ void DnsFirewall::adoptBaselineAtStart()
         updateBaselineIfNeeded();
         return;
     }
-    // The rules from before cover these adapters and, unlike a rebuild now, the excluded apps too.
-    std::set<types::IpAddress> servers;
-    getAdapters(servers, baselineInterfaces_);
+    // The persistent rules from before block DNS on every adapter (including any added while Windows
+    // was off) and, unlike a rebuild now, already permit the excluded apps, which the client only
+    // sends later. They hold no tunnel or custom DNS permit (those are not persistent).
+    isBaselineInPlace_ = true;
+    baselineTunnels_.clear();
+    baselineAddresses_.clear();
     isWaitingForExcludedApps_ = !isExcludedAppsKnown_;
     spdlog::info("DnsFirewall: keeping the DNS baseline from before until the client's excluded apps arrive");
+    // A Windscribe tunnel adapter left over needs its permit now.
+    std::set<types::IpAddress> servers;
+    std::set<uint64_t> tunnels;
+    if (getAdapters(servers, tunnels) && !tunnels.empty()) {
+        isWaitingForExcludedApps_ = false;
+        updateBaselineIfNeeded();
+    }
 }
 
 void DnsFirewall::updateBaselineIfNeeded()
@@ -371,29 +389,30 @@ void DnsFirewall::updateBaselineIfNeeded()
         return;
     }
     std::set<types::IpAddress> servers;
-    std::set<uint64_t> interfaces;
-    const bool isKnown = getAdapters(servers, interfaces);
+    std::set<uint64_t> tunnels;
+    const bool isKnown = getAdapters(servers, tunnels);
     const bool appsChanged = baselineApps_.request(permittedApps_.requested());
-    const bool interfacesChanged = isKnown && interfaces != baselineInterfaces_;
+    const bool tunnelsChanged = isKnown && tunnels != baselineTunnels_;
     const bool addressesChanged = baselinePermittedAddresses() != baselineAddresses_;
-    if (isBaselineDirty_ || appsChanged || interfacesChanged || addressesChanged) {
+    if (isBaselineDirty_ || appsChanged || tunnelsChanged || addressesChanged) {
         applyBaselineImpl();
     }
 }
 
 void DnsFirewall::applyBaselineImpl()
 {
+    // The block does not depend on the adapters; only the tunnel permits do. If they cannot be read,
+    // the last ones known are used and the monitor retries.
     std::set<types::IpAddress> servers;
-    std::set<uint64_t> interfaces;
-    if (!getAdapters(servers, interfaces)) {
-        // Keep what is in place; the monitor retries.
-        isBaselineDirty_ = true;
-        return;
+    std::set<uint64_t> tunnels;
+    const bool isKnown = getAdapters(servers, tunnels);
+    if (!isKnown) {
+        tunnels = baselineTunnels_;
     }
     AppsIds permittedApps = permittedApps_.requested();
     baselineApps_.request(permittedApps);
     const std::set<types::IpAddress> addresses = baselinePermittedAddresses();
-    const auto rules = scoped_permits::dnsBaselineRules(interfaces, addresses, permittedApps.count());
+    const auto rules = scoped_permits::dnsBaselineRules(tunnels, addresses, permittedApps.count());
 
     HANDLE hEngine = fwmpWrapper_.getHandleAndLock();
     WfpBaselineRuleStore store(fwmpWrapper_, hEngine, baselineSubLayerGUID_, permittedApps);
@@ -401,22 +420,31 @@ void DnsFirewall::applyBaselineImpl()
     fwmpWrapper_.unlock();
 
     if (result == scoped_permits::ReplaceResult::kKeptPrevious) {
-        spdlog::error("DnsFirewall: DNS baseline could not be rebuilt; the previous rules stay");
+        spdlog::error("DnsFirewall: DNS baseline could not be {}; {}", isBaselineInPlace_ ? "rebuilt" : "installed",
+                      isBaselineInPlace_ ? "the previous rules stay" : "the firewall holds its LAN permit back");
         isBaselineDirty_ = true;
         return;
     }
-    baselineInterfaces_ = interfaces;
+    if (!isBaselineInPlace_) {
+        isReadyNotificationPending_ = true;  // the monitor calls the ready callback
+    }
+    isBaselineInPlace_ = true;
+    baselineTunnels_ = tunnels;
     baselineAddresses_ = addresses;
-    if (result == scoped_permits::ReplaceResult::kApplied) {
+    if (result == scoped_permits::ReplaceResult::kApplied && isKnown) {
         baselineApps_.onApplied();
         isBaselineDirty_ = false;
     } else {
-        baselineApps_.onNoPermitsInPlace();
+        if (result != scoped_permits::ReplaceResult::kApplied) {
+            baselineApps_.onNoPermitsInPlace();
+            spdlog::error("DnsFirewall: DNS baseline blocks in place, a permit is missing; will retry");
+        } else {
+            baselineApps_.onApplied();
+        }
         isBaselineDirty_ = true;
-        spdlog::error("DnsFirewall: DNS baseline blocks in place, a permit is missing; will retry");
     }
-    spdlog::info("DnsFirewall: DNS baseline on {} physical adapter(s), {} permitted address(es), {} program(s)",
-                 interfaces.size(), addresses.size(), permittedApps.count());
+    spdlog::info("DnsFirewall: DNS baseline on, {} tunnel adapter(s), {} permitted address(es), {} program(s)",
+                 tunnels.size(), addresses.size(), permittedApps.count());
 }
 
 bool DnsFirewall::removeBaselineImpl()
@@ -442,7 +470,8 @@ bool DnsFirewall::removeBaselineImpl()
     }
     fwmpWrapper_.unlock();
     if (isRemoved) {
-        baselineInterfaces_.clear();
+        isBaselineInPlace_ = false;
+        baselineTunnels_.clear();
         baselineAddresses_.clear();
         baselineApps_.onNoPermitsInPlace();
         isBaselineDirty_ = false;
@@ -546,6 +575,8 @@ void DnsFirewall::monitorThread()
 
 void DnsFirewall::checkForChanges()
 {
+    std::function<void()> callback;
+    {
     std::lock_guard<std::recursive_mutex> guard(mutex_);
     if (requests_.isWanted()) {
         std::set<types::IpAddress> servers;
@@ -558,33 +589,42 @@ void DnsFirewall::checkForChanges()
             enableImpl();
         }
     }
+    bool hasBecomeReady = false;
     if (isBaselineEnabled_) {
         if (isWaitingForExcludedApps_) {
-            // A new adapter must not wait for the client.
+            // A Windscribe tunnel adapter appearing needs its permit; it does not wait for the client.
             std::set<types::IpAddress> servers;
-            std::set<uint64_t> interfaces;
-            if (getAdapters(servers, interfaces) && interfaces != baselineInterfaces_) {
+            std::set<uint64_t> tunnels;
+            if (getAdapters(servers, tunnels) && !tunnels.empty()) {
                 isWaitingForExcludedApps_ = false;
             }
         }
         updateBaselineIfNeeded();
+        hasBecomeReady = isReadyNotificationPending_ && isBaselineInPlace_;
+        isReadyNotificationPending_ = false;
     } else if (isBaselineDirty_) {
         // A removal that failed.
         removeBaselineImpl();
+    }
+    callback = hasBecomeReady ? baselineReadyCallback_ : std::function<void()>();
+    }
+    // Outside the lock: the callback turns the main firewall's LAN permit back on.
+    if (callback) {
+        callback();
     }
 }
 
 bool DnsFirewall::getDnsServers(std::set<types::IpAddress> &dnsServers)
 {
-    std::set<uint64_t> physicalInterfaces;
-    return getAdapters(dnsServers, physicalInterfaces);
+    std::set<uint64_t> tunnelInterfaces;
+    return getAdapters(dnsServers, tunnelInterfaces);
 }
 
-bool DnsFirewall::getAdapters(std::set<types::IpAddress> &dnsServers, std::set<uint64_t> &physicalInterfaces)
+bool DnsFirewall::getAdapters(std::set<types::IpAddress> &dnsServers, std::set<uint64_t> &tunnelInterfaces)
 {
     WS_DEBUG_TRACE_SCOPE("DnsFirewall::getAdapters");
     dnsServers.clear();
-    physicalInterfaces.clear();
+    tunnelInterfaces.clear();
 
     DWORD dwRetVal = 0;
     ULONG outBufLen = 0;
@@ -616,11 +656,11 @@ bool DnsFirewall::getAdapters(std::set<types::IpAddress> &dnsServers, std::set<u
     PIP_ADAPTER_ADDRESSES pCurrAddresses = (PIP_ADAPTER_ADDRESSES)&arr[0];
     while (pCurrAddresses) {
         // Warning: we control the FriendlyName of the wireguard-nt adapter, but not the Description.
-        if ((wcsstr(pCurrAddresses->Description, WS_PRODUCT_NAME_W) == 0) &&
-            (wcsstr(pCurrAddresses->FriendlyName, WS_PRODUCT_NAME_W) == 0)) {
-            if (pCurrAddresses->IfType != IF_TYPE_SOFTWARE_LOOPBACK) {
-                physicalInterfaces.insert(pCurrAddresses->Luid.Value);
-            }
+        if ((wcsstr(pCurrAddresses->Description, WS_PRODUCT_NAME_W) != 0) ||
+            (wcsstr(pCurrAddresses->FriendlyName, WS_PRODUCT_NAME_W) != 0)) {
+            // Windscribe's own adapters: the tunnel (DNS through the VPN).
+            tunnelInterfaces.insert(pCurrAddresses->Luid.Value);
+        } else {
             PIP_ADAPTER_DNS_SERVER_ADDRESS dnsServerAddress = pCurrAddresses->FirstDnsServerAddress;
             while (dnsServerAddress) {
                 const auto family = dnsServerAddress->Address.lpSockaddr->sa_family;

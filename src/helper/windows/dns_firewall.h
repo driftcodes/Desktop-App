@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <mutex>
 #include <thread>
 #include <set>
@@ -46,12 +47,17 @@ public:
     void setExcludedAppsIds(const AppsIds &appsIds);
 
     // The DNS baseline (see scoped_permits::dnsBaselineRules): on with the main firewall, off with
-    // it. Persistent, like the firewall's rules, so it is in place from boot with Always On. While
-    // on, the monitor rebuilds it when the physical adapters change.
-    void setBaselineEnabled(bool isEnabled);
-    // Service start with the firewall kept from before (firewall on boot): keep the baseline left
-    // in place (it already permits the excluded apps, which the client only sends later) and rebuild
-    // it once the client has sent them, or when the adapters change. One is built if none is there.
+    // it. Its block and program permits are persistent, like the firewall's rules, so they are in
+    // place once Windows loads persistent filters at boot with Always On. While on, the monitor
+    // rebuilds it when Windscribe's tunnel adapters, the programs or the custom DNS change, and
+    // retries a rebuild that failed. Returns whether its blocks are in place (always true for off).
+    bool setBaselineEnabled(bool isEnabled);
+    // Called (from the monitor, outside its lock) when a baseline that was not in place gets in.
+    void setBaselineReadyCallback(std::function<void()> callback);
+    // Service start with the firewall kept from before (firewall on boot): keep the persistent rules
+    // left in place (they cover every adapter and already permit the excluded apps, which the client
+    // only sends later) and rebuild once the client has sent them, or a tunnel adapter appears. One
+    // is built if none is there.
     void adoptBaselineAtStart();
 
 private:
@@ -69,10 +75,13 @@ private:
     // The baseline.
     GUID baselineSubLayerGUID_;
     bool isBaselineEnabled_ = false;
+    bool isBaselineInPlace_ = false;           // its blocks are installed
+    bool isReadyNotificationPending_ = false;  // got in since the monitor last looked
+    std::function<void()> baselineReadyCallback_;
     bool isBaselineDirty_ = false;
     bool isWaitingForExcludedApps_ = false;   // adopted at start: keep it until the client's list comes
     bool isExcludedAppsKnown_ = false;
-    std::set<uint64_t> baselineInterfaces_;           // the physical adapters it covers
+    std::set<uint64_t> baselineTunnels_;              // the tunnel adapters it permits
     std::set<types::IpAddress> baselineAddresses_;    // the addresses it permits (connected custom DNS)
     scoped_permits::PermittedAppsTracker<AppsIds> baselineApps_;
 
@@ -85,8 +94,8 @@ private:
     void updatePermittedApps();
     // false when the adapters could not be read (an empty set is a valid answer).
     bool getDnsServers(std::set<types::IpAddress> &dnsServers);
-    // Also the physical adapters (not Windscribe's, not loopback), by LUID.
-    bool getAdapters(std::set<types::IpAddress> &dnsServers, std::set<uint64_t> &physicalInterfaces);
+    // Also Windscribe's own (tunnel) adapters, by LUID; their DNS servers are not included.
+    bool getAdapters(std::set<types::IpAddress> &dnsServers, std::set<uint64_t> &tunnelInterfaces);
 
     // The custom connected DNS addresses the baseline permits: only while the session filter is in
     // its connected mode.

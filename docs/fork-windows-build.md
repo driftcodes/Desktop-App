@@ -58,19 +58,31 @@ Emergency Connect is unchanged and never uses the proxy.
   it adds no permit for those DNS servers at all (rather than one for every program), keeps the rest
   of the firewall on, and the app logs the failure and retries on the next firewall update; until then
   Windscribe may be unable to look up hostnames.
-- **DNS baseline: no DNS out of your Wi-Fi/Ethernet while the firewall is on (Windows).** Whenever
+- **DNS baseline: no DNS outside the tunnel while the firewall is on (Windows).** Whenever
   Windscribe's firewall is on (connected, connecting, reconnecting, after your own Disconnect in
-  Always On, and from boot with Always On, since its rules persist like the firewall's), DNS (port 53,
-  UDP and TCP) sent out of a physical adapter is blocked for every program, to any address: your
-  router, a public resolver, or one no adapter lists any more (for example after you switch the
-  Wi-Fi's DNS to Google). The firewall's LAN permit (Allow LAN, and always for imported profiles)
-  would otherwise let any program query the router directly. Only Windscribe's own programs and the
-  apps excluded in Exclusive split tunneling (Throne) may still do so; while connected, a custom
-  Connected DNS address is allowed too. DNS through the VPN adapter is not affected, and other LAN
-  traffic (the router's web page, printers, file shares) still works. With the firewall on and the
-  VPN not connected, ordinary programs therefore cannot look up names at all (they cannot reach the
-  internet then anyway); local names that come from the router's DNS do not resolve either.
-  Turning the firewall off removes the baseline.
+  Always On, and after a restart with Always On), DNS (port 53, UDP and TCP) is blocked for every
+  program on every network adapter, to any address: your router, a public resolver, or one no adapter
+  lists any more (for example after you switch the Wi-Fi's DNS to Google). It covers adapters
+  Windscribe has never seen, such as one plugged in while Windows was off. The firewall's LAN permit
+  (Allow LAN, and always for imported profiles) would otherwise let any program query the router
+  directly. Allowed:
+  - Windscribe's own programs and the apps excluded in Exclusive split tunneling (Throne);
+  - DNS through Windscribe's tunnel adapter, and to this PC itself (127.0.0.1, e.g. ctrld);
+  - while connected, a custom Connected DNS address.
+
+  Other LAN traffic (the router's web page, printers, file shares) still works. With the firewall on
+  and the VPN not connected, ordinary programs cannot look up names at all (they cannot reach the
+  internet then anyway); local names from the router's DNS do not resolve either. Turning the
+  firewall off removes it.
+  - The firewall goes on only after the baseline is in. If Windows cannot install it, the firewall
+    goes on without its LAN permit (so no router DNS either, but also no router page or printers),
+    the app logs the failure, and the LAN permit comes back once a retry gets the baseline in.
+  - After a restart, the baseline's block and the permit for Windscribe and your excluded apps are
+    already there when the app starts (they persist, like the firewall's rules); the tunnel and
+    custom-DNS permits are set up again when you connect. "Already there" means from when Windows
+    loads persistent firewall rules during startup (the Base Filtering Engine), not from the very
+    first moment the network starts; the main firewall works the same way. A test after you sign in,
+    before opening Windscribe, covers that state.
 - **DNS leak filter during a proxied session (Windows).** Windscribe has a second filter that blocks
   DNS (port 53, UDP and TCP) to the DNS servers of your physical adapters. With a proxy set it now
   stays on from the moment you click Connect until your own Disconnect, including reconnects and the
@@ -146,11 +158,10 @@ Emergency Connect is unchanged and never uses the proxy.
   - Without a proxy nothing changes from the official app.
 - **Always On at boot (before the app starts).** The Windows controller does not use the list it is
   given for the boot-time firewall: the helper simply keeps the rules it last applied, which persist
-  across a restart, and the DNS baseline persists with them. When the service starts it keeps the
-  baseline from before (which already permits your excluded apps) until the app has sent its split
-  tunneling list, then rebuilds it. The DNS leak filter itself does not persist; it is set up again
-  when you connect. A network adapter added while Windows was off is covered once the service has
-  started. This has not been confirmed on a real Windows restart yet.
+  across a restart, and the DNS baseline's persistent part with them (see above). When the service
+  starts it keeps that baseline (it already permits your excluded apps) until the app has sent its
+  split tunneling list, then rebuilds it. The DNS leak filter itself does not persist; it is set up
+  again when you connect. This has not been confirmed on a real Windows restart yet.
 
 ### Reconnecting
 

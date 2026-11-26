@@ -317,66 +317,61 @@ void testRejectedRequestKeepsOwnersExceptions()
     VERIFY(!requests.permitApps());
 }
 
-// Does the baseline stop a non-permitted program's DNS to addr over this adapter?
-bool baselineBlocks(const std::vector<scoped_permits::BaselineRule> &rules, uint64_t luid, const IpAddress &addr)
+const uint64_t kWifi = 0x47000000000001ULL;
+const uint64_t kUsbEthernet = 0x06000000000002ULL;   // plugged in while Windows was off
+const uint64_t kTunnel = 0x35000000000003ULL;        // Windscribe's VPN adapter
+const uint64_t kLoopback = 0x18000000000001ULL;
+
+void testBaselineBlocksDnsOnEveryAdapter()
 {
-    using scoped_permits::BaselineAction;
-    bool isBlocked = false;
-    for (const auto &rule : rules) {
-        if (rule.interfaceLuid != luid || rule.isV6 != addr.isV6()) {
-            continue;
-        }
-        if (rule.action == BaselineAction::kPermitAddress && rule.address == addr) {
-            return false;  // the highest weight
-        }
-        if (rule.action == BaselineAction::kBlock) {
-            isBlocked = true;
-        }
-    }
-    return isBlocked;
+    using scoped_permits::baselineAllows;
+    const auto rules = scoped_permits::dnsBaselineRules({kTunnel}, {}, 3);
+
+    // nslookup to the router over Wi-Fi, whether or not the Wi-Fi lists it as its DNS server (it
+    // does not after switching the Wi-Fi to Google's), and to public resolvers.
+    VERIFY(!baselineAllows(rules, kWifi, ip("192.168.31.1"), false));
+    VERIFY(!baselineAllows(rules, kWifi, ip("8.8.8.8"), false));
+    VERIFY(!baselineAllows(rules, kWifi, ip("1.1.1.1"), false));
+    VERIFY(!baselineAllows(rules, kWifi, ip("fe80::1"), false));
+    // An adapter nobody told it about is covered too.
+    VERIFY(!baselineAllows(rules, kUsbEthernet, ip("192.168.42.129"), false));
+    // DNS through the VPN adapter, and to loopback (ctrld), works for every program.
+    VERIFY(baselineAllows(rules, kTunnel, ip("10.255.255.1"), false));
+    VERIFY(baselineAllows(rules, kTunnel, ip("10.8.0.1"), false));
+    VERIFY(baselineAllows(rules, kLoopback, ip("127.0.0.1"), false));
+    VERIFY(baselineAllows(rules, kLoopback, ip("::1"), false));
+    // Windscribe's programs and excluded apps (Throne) keep DNS on every adapter.
+    VERIFY(baselineAllows(rules, kWifi, ip("192.168.31.1"), true));
+    VERIFY(baselineAllows(rules, kUsbEthernet, ip("8.8.8.8"), true));
+
+    // No programs known: no permit for them.
+    const auto noApps = scoped_permits::dnsBaselineRules({}, {}, 0);
+    VERIFY(!baselineAllows(noApps, kWifi, ip("192.168.31.1"), true));
+
+    // Connected with a custom Connected DNS on the LAN: that address is reachable, others are not.
+    const auto custom = scoped_permits::dnsBaselineRules({kTunnel}, {ip("192.168.31.1")}, 3);
+    VERIFY(baselineAllows(custom, kWifi, ip("192.168.31.1"), false));
+    VERIFY(!baselineAllows(custom, kWifi, ip("192.168.31.2"), false));
+    VERIFY(!baselineAllows(custom, kWifi, ip("8.8.8.8"), false));
 }
 
-bool baselinePermitsApps(const std::vector<scoped_permits::BaselineRule> &rules, uint64_t luid, bool isV6)
+void testBaselineAfterReboot()
 {
-    for (const auto &rule : rules) {
-        if (rule.interfaceLuid == luid && rule.isV6 == isV6 && rule.action == scoped_permits::BaselineAction::kPermitApps) {
-            return true;
-        }
-    }
-    return false;
-}
-
-void testBaselineBlocksAnyResolverOnPhysicalAdapters()
-{
-    const uint64_t wifi = 0x47000000000001ULL;
-    const uint64_t ethernet = 0x06000000000002ULL;
-    const uint64_t vpnAdapter = 0x35000000000003ULL;  // never in the list: not physical
-    const auto rules = scoped_permits::dnsBaselineRules({wifi, ethernet}, {}, 3);
-
-    // Your capture: nslookup to the router over Wi-Fi, whether or not the Wi-Fi lists it as its DNS
-    // server (it does not after switching the Wi-Fi to Google's 8.8.8.8 / 8.8.4.4).
-    VERIFY(baselineBlocks(rules, wifi, ip("192.168.31.1")));
-    VERIFY(baselineBlocks(rules, wifi, ip("8.8.8.8")));
-    VERIFY(baselineBlocks(rules, wifi, ip("1.1.1.1")));
-    VERIFY(baselineBlocks(rules, wifi, ip("fe80::1")));
-    VERIFY(baselineBlocks(rules, ethernet, ip("10.0.0.1")));
-    // DNS through the VPN adapter is not touched.
-    VERIFY(!baselineBlocks(rules, vpnAdapter, ip("10.255.255.1")));
-    // Windscribe's programs and excluded apps (Throne) keep DNS on every physical adapter.
-    VERIFY(baselinePermitsApps(rules, wifi, false));
-    VERIFY(baselinePermitsApps(rules, wifi, true));
-    VERIFY(baselinePermitsApps(rules, ethernet, false));
-
-    // No programs known: blocks only, no permit at all.
-    const auto noApps = scoped_permits::dnsBaselineRules({wifi}, {}, 0);
-    VERIFY(!baselinePermitsApps(noApps, wifi, false));
-    VERIFY(baselineBlocks(noApps, wifi, ip("192.168.31.1")));
-
-    // Connected with a custom Connected DNS on the LAN: that address stays reachable, others do not.
-    const auto custom = scoped_permits::dnsBaselineRules({wifi}, {ip("192.168.31.1")}, 3);
-    VERIFY(!baselineBlocks(custom, wifi, ip("192.168.31.1")));
-    VERIFY(baselineBlocks(custom, wifi, ip("192.168.31.2")));
-    VERIFY(baselineBlocks(custom, wifi, ip("8.8.8.8")));
+    using scoped_permits::baselineAllows;
+    // What was in place while connected: tunnel permit and a custom DNS on the LAN.
+    const auto running = scoped_permits::dnsBaselineRules({kTunnel}, {ip("192.168.31.1")}, 3);
+    // Only the persistent part survives a reboot.
+    const auto atBoot = scoped_permits::persistentBaselineRules(running);
+    // Saved while only Wi-Fi existed; at boot Wi-Fi and a USB adapter are present and the GUI has not
+    // started: both are blocked for ordinary programs.
+    VERIFY(!baselineAllows(atBoot, kWifi, ip("192.168.31.1"), false));
+    VERIFY(!baselineAllows(atBoot, kUsbEthernet, ip("192.168.42.129"), false));
+    // No stale exception: neither the old custom DNS nor the old tunnel adapter's.
+    VERIFY(!baselineAllows(atBoot, kWifi, ip("192.168.31.1"), false));
+    VERIFY(!baselineAllows(atBoot, kTunnel, ip("10.255.255.1"), false));
+    // Throne (an excluded app saved in the rules) and loopback still work before the GUI starts.
+    VERIFY(baselineAllows(atBoot, kWifi, ip("192.168.31.1"), true));
+    VERIFY(baselineAllows(atBoot, kLoopback, ip("127.0.0.1"), false));
 }
 
 class FakeBaselineStore : public scoped_permits::RuleStore<scoped_permits::BaselineRule>
@@ -401,27 +396,37 @@ public:
     void abort() override { working.clear(); }
 };
 
-void testBaselineReplacementKeepsOldRulesOnFailure()
+void testFirstBaselineInstallFails()
 {
     using scoped_permits::ReplaceResult;
-    const uint64_t wifi = 0x47000000000001ULL;
-    const uint64_t usbTether = 0x06000000000009ULL;
+    // No baseline from before; the first install cannot add its block.
     FakeBaselineStore store;
-    VERIFY(scoped_permits::replaceDnsRules(store, true, scoped_permits::dnsBaselineRules({wifi}, {}, 2)) ==
+    store.failAddAt = 0;
+    const auto result = scoped_permits::replaceDnsRules(store, true, scoped_permits::dnsBaselineRules({}, {}, 3));
+    VERIFY(result == ReplaceResult::kKeptPrevious);
+    VERIFY(store.committed.empty());
+    const bool isBaselineInPlace = false;
+    // firewallOn then holds the LAN permit back and reports the request as incomplete.
+    const auto plan = scoped_permits::planFirewallOn(isBaselineInPlace, true);
+    VERIFY(plan.holdLanPermit);
+    VERIFY(!plan.isComplete);
+    // Once it is in: LAN permit back, complete.
+    store.failAddAt = -1;
+    store.addCalls = 0;
+    VERIFY(scoped_permits::replaceDnsRules(store, true, scoped_permits::dnsBaselineRules({}, {}, 3)) ==
            ReplaceResult::kApplied);
-    VERIFY(baselineBlocks(store.committed, wifi, ip("192.168.31.1")));
+    const auto ready = scoped_permits::planFirewallOn(true, true);
+    VERIFY(!ready.holdLanPermit);
+    VERIFY(ready.isComplete);
+    // A main firewall that is incomplete for its own reasons stays reported as such.
+    VERIFY(!scoped_permits::planFirewallOn(true, false).isComplete);
 
-    // A new adapter appears; its block cannot be added: the old rules stay whole.
-    const auto both = scoped_permits::dnsBaselineRules({wifi, usbTether}, {}, 2);
+    // A later failed rebuild keeps the rules in place.
     store.addCalls = 0;
     store.failAddAt = 0;
-    VERIFY(scoped_permits::replaceDnsRules(store, true, both) == ReplaceResult::kKeptPrevious);
-    VERIFY(baselineBlocks(store.committed, wifi, ip("192.168.31.1")));
-    // Only a permit fails: blocks in (fails closed), retried.
-    store.addCalls = 0;
-    store.failAddAt = 1;
-    VERIFY(scoped_permits::replaceDnsRules(store, true, both) == ReplaceResult::kAppliedWithoutSomePermits);
-    VERIFY(baselineBlocks(store.committed, usbTether, ip("192.168.42.129")));
+    VERIFY(scoped_permits::replaceDnsRules(store, true, scoped_permits::dnsBaselineRules({kTunnel}, {}, 3)) ==
+           ReplaceResult::kKeptPrevious);
+    VERIFY(!scoped_permits::baselineAllows(store.committed, kWifi, ip("192.168.31.1"), false));
 }
 
 } // namespace
@@ -437,8 +442,9 @@ int main()
     testResolverChangeOnSameWifiWhileConnected();
     testRemovedExclusionRetriedAfterFailedRebuild();
     testRejectedRequestKeepsOwnersExceptions();
-    testBaselineBlocksAnyResolverOnPhysicalAdapters();
-    testBaselineReplacementKeepsOldRulesOnFailure();
+    testBaselineBlocksDnsOnEveryAdapter();
+    testBaselineAfterReboot();
+    testFirstBaselineInstallFails();
     if (g_failures == 0) {
         printf("All scoped permit tests passed.\n");
     }

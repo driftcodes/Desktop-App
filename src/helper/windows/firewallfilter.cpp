@@ -21,7 +21,7 @@ void FirewallFilter::release()
 }
 
 bool FirewallFilter::on(const wchar_t *connectingIp, const std::vector<std::wstring> &ips, const std::vector<std::wstring> &windscribeOnlyIps,
-                        bool bAllowLocalTraffic, bool bIsCustomConfig)
+                        bool bAllowLocalTraffic, bool bIsCustomConfig, bool bHoldLanPermit)
 {
     bool isComplete = false;
     std::lock_guard<std::recursive_mutex> guard(mutex_);
@@ -43,7 +43,8 @@ bool FirewallFilter::on(const wchar_t *connectingIp, const std::vector<std::wstr
 
     DWORD dwRet = FwpmSubLayerAdd0(hEngine, &subLayer, NULL );
     if (dwRet == ERROR_SUCCESS) {
-        isComplete = addFilters(hEngine, connectingIp, ips, windscribeOnlyIps, bAllowLocalTraffic, bIsCustomConfig);
+        isComplete = addFilters(hEngine, connectingIp, ips, windscribeOnlyIps, bAllowLocalTraffic, bIsCustomConfig,
+                                bHoldLanPermit);
     } else {
         spdlog::error("FirewallFilter::on(), FwpmSubLayerAdd0 failed: {}", dwRet);
     }
@@ -200,7 +201,8 @@ void FirewallFilter::setSplitTunnelingWhitelistIps(const std::vector<types::IpAd
 }
 
 bool FirewallFilter::addFilters(HANDLE engineHandle, const wchar_t *connectingIp, const std::vector<std::wstring> &ips,
-                                const std::vector<std::wstring> &windscribeOnlyIps, bool bAllowLocalTraffic, bool bIsCustomConfig)
+                                const std::vector<std::wstring> &windscribeOnlyIps, bool bAllowLocalTraffic, bool bIsCustomConfig,
+                                bool bHoldLanPermit)
 {
     // false when a permit the caller asked for is missing (the firewall is still on, blocking more).
     bool isComplete = true;
@@ -387,7 +389,9 @@ bool FirewallFilter::addFilters(HANDLE engineHandle, const wchar_t *connectingIp
     // add permit/block filters for Local Network.
     // We explicitly block if not allowed, since this setting should take precedence over split tunneling filters.
     // Custom configs need private ranges allowed so third-party VPN DNS/gateway/routes work.
-    bool bAllowLan = bAllowLocalTraffic || bIsCustomConfig;
+    // Held back while the DNS baseline is not in place: the LAN permit would let any program query a
+    // router's DNS.
+    bool bAllowLan = (bAllowLocalTraffic || bIsCustomConfig) && !bHoldLanPermit;
     const std::vector<types::IpAddressRange> privV4 = types::IpAddressRange::fromStrings(
         {"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16"});
     ret = Utils::addFilterV4(engineHandle, nullptr, bAllowLan ? FWP_ACTION_PERMIT : FWP_ACTION_BLOCK, 4, subLayerGUID_, FIREWALL_SUBLAYER_NAMEW, nullptr, &privV4);

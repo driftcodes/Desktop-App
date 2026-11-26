@@ -103,25 +103,33 @@ inline std::vector<DnsRule> dnsFilterRules(const std::set<types::IpAddress> &ser
 }
 
 // The DNS baseline: whenever the main firewall is on (connected, reconnecting, disconnected with
-// Always On, and from boot, being persistent like the firewall's rules), port 53 over the physical
-// adapters is blocked for every program and every address, listed as a DNS server or not. The
-// firewall's LAN permit (Allow LAN, and always for imported profiles) would otherwise let any
-// program query a router directly, also one no adapter lists any more (e.g. after switching the
-// Wi-Fi's DNS to a public one). Scoped to the physical adapters, it leaves DNS through the VPN
-// adapter alone. Windscribe's programs and Exclusive-mode excluded apps are permitted; while
-// connected, so are the custom connected DNS addresses (they may be on the LAN).
+// Always On, and from when Windows loads persistent filters at boot), port 53 (UDP and TCP) is
+// blocked for every program, on every interface and to every address. The firewall's LAN permit
+// (Allow LAN, and always for imported profiles) would otherwise let any program query a router
+// directly, also one no adapter lists any more (e.g. after switching the Wi-Fi's DNS to a public
+// one). Being on every interface, it covers adapters it has never seen (one plugged in while
+// Windows was off, or later) without having to know about them. Permitted:
+// - Windscribe's programs and Exclusive-mode excluded apps (Throne), everywhere;
+// - every program over Windscribe's own tunnel adapters (DNS through the VPN) and to loopback
+//   (local DNS such as ctrld);
+// - every program to the custom connected DNS addresses, while connected (they may be on the LAN).
+// Only what holds whatever adapters exist is persistent (the block, the programs' permit, loopback):
+// tunnel and custom-DNS permits are not, so a reboot never brings back a stale exception.
 enum class BaselineAction {
-    kBlock,          // port 53 on this adapter, every program, every address
-    kPermitApps,     // the same for Windscribe's programs and excluded apps
-    kPermitAddress   // port 53 to this address on this adapter, every program
+    kBlock,           // port 53, every program
+    kPermitApps,      // Windscribe's programs and excluded apps
+    kPermitLoopback,  // every program, to loopback
+    kPermitTunnel,    // every program, over a Windscribe tunnel adapter
+    kPermitAddress    // every program, to a custom connected DNS address
 };
 
 struct BaselineRule
 {
-    uint64_t interfaceLuid;
-    bool isV6;
     BaselineAction action;
-    types::IpAddress address;  // kPermitAddress only
+    bool isV6;
+    uint64_t interfaceLuid;       // kPermitTunnel only; 0 = every interface
+    types::IpAddressRange range;  // kPermitLoopback / kPermitAddress only
+    bool isPersistent;
 };
 
 inline bool isBlockRule(const BaselineRule &rule)
@@ -129,25 +137,99 @@ inline bool isBlockRule(const BaselineRule &rule)
     return rule.action == BaselineAction::kBlock;
 }
 
-inline std::vector<BaselineRule> dnsBaselineRules(const std::set<uint64_t> &physicalInterfaces,
+// WFP weight within the baseline's sublayer: the highest matching filter decides.
+inline uint8_t baselineWeight(BaselineAction action)
+{
+    switch (action) {
+    case BaselineAction::kBlock:
+        return 6;
+    case BaselineAction::kPermitApps:
+        return 7;
+    case BaselineAction::kPermitLoopback:
+    case BaselineAction::kPermitTunnel:
+    case BaselineAction::kPermitAddress:
+        return 8;
+    }
+    return 6;
+}
+
+inline std::vector<BaselineRule> dnsBaselineRules(const std::set<uint64_t> &tunnelInterfaces,
                                                   const std::set<types::IpAddress> &permittedAddresses,
                                                   size_t permittedAppsCount)
 {
     std::vector<BaselineRule> rules;
-    for (const uint64_t luid : physicalInterfaces) {
-        for (const bool isV6 : {false, true}) {
-            rules.push_back(BaselineRule{luid, isV6, BaselineAction::kBlock, types::IpAddress()});
-            if (permittedAppsCount > 0) {
-                rules.push_back(BaselineRule{luid, isV6, BaselineAction::kPermitApps, types::IpAddress()});
-            }
-            for (const auto &addr : permittedAddresses) {
-                if (addr.isValid() && addr.isV6() == isV6) {
-                    rules.push_back(BaselineRule{luid, isV6, BaselineAction::kPermitAddress, addr});
-                }
+    for (const bool isV6 : {false, true}) {
+        rules.push_back(BaselineRule{BaselineAction::kBlock, isV6, 0, types::IpAddressRange(), true});
+        if (permittedAppsCount > 0) {
+            rules.push_back(BaselineRule{BaselineAction::kPermitApps, isV6, 0, types::IpAddressRange(), true});
+        }
+        rules.push_back(BaselineRule{BaselineAction::kPermitLoopback, isV6, 0,
+                                     types::IpAddressRange(std::string(isV6 ? "::1/128" : "127.0.0.0/8")), true});
+        for (const uint64_t luid : tunnelInterfaces) {
+            rules.push_back(BaselineRule{BaselineAction::kPermitTunnel, isV6, luid, types::IpAddressRange(), false});
+        }
+        for (const auto &addr : permittedAddresses) {
+            if (addr.isValid() && addr.isV6() == isV6) {
+                rules.push_back(BaselineRule{BaselineAction::kPermitAddress, isV6, 0,
+                                             types::IpAddressRange(addr, isV6 ? 128 : 32), false});
             }
         }
     }
     return rules;
+}
+
+// Whether a program's DNS to addr over the interface gets through the baseline.
+inline bool baselineAllows(const std::vector<BaselineRule> &rules, uint64_t interfaceLuid, const types::IpAddress &addr,
+                           bool isPermittedProgram)
+{
+    int best = -1;
+    bool isPermit = true;  // nothing matching: the baseline does not stop it
+    for (const auto &rule : rules) {
+        if (rule.isV6 != addr.isV6()) {
+            continue;
+        }
+        if (rule.interfaceLuid != 0 && rule.interfaceLuid != interfaceLuid) {
+            continue;
+        }
+        if (rule.range.isValid() && !rangeContains(rule.range, addr)) {
+            continue;
+        }
+        if (rule.action == BaselineAction::kPermitApps && !isPermittedProgram) {
+            continue;
+        }
+        const int weight = baselineWeight(rule.action);
+        if (weight > best) {
+            best = weight;
+            isPermit = rule.action != BaselineAction::kBlock;
+        }
+    }
+    return isPermit;
+}
+
+// What persists across a reboot.
+inline std::vector<BaselineRule> persistentBaselineRules(const std::vector<BaselineRule> &rules)
+{
+    std::vector<BaselineRule> persistent;
+    for (const auto &rule : rules) {
+        if (rule.isPersistent) {
+            persistent.push_back(rule);
+        }
+    }
+    return persistent;
+}
+
+// firewallOn with the DNS baseline: the baseline goes in first. Without it in place the main firewall
+// is turned on without its LAN permit (so the LAN DNS path stays closed), the request counts as
+// incomplete for the client, and the LAN permit is added once the baseline is in.
+struct FirewallOnPlan
+{
+    bool holdLanPermit;
+    bool isComplete;
+};
+
+inline FirewallOnPlan planFirewallOn(bool isBaselineInPlace, bool isFirewallComplete)
+{
+    return {!isBaselineInPlace, isBaselineInPlace && isFirewallComplete};
 }
 
 struct DnsRulePlan

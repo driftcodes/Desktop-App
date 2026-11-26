@@ -23,8 +23,10 @@ public:
     // setWindscribeAppsIds) - not svchost, so the Windows DNS client cannot relay other programs'
     // lookups through them. Returns false when a requested permit could not be added (e.g. Windscribe's
     // programs are unknown, so windscribeOnlyIps get no permit); the firewall is on either way.
+    // bHoldLanPermit: turn the firewall on without its LAN permit (Allow LAN / custom config), e.g.
+    // while the DNS baseline that keeps DNS off the LAN is not in place yet.
     bool on(const wchar_t *connectingIp, const std::vector<std::wstring> &ips, const std::vector<std::wstring> &windscribeOnlyIps,
-            bool bAllowLocalTraffic, bool bIsCustomConfig);
+            bool bAllowLocalTraffic, bool bIsCustomConfig, bool bHoldLanPermit = false);
     void off();
     bool currentStatus();
 
@@ -54,7 +56,8 @@ private:
     void offImpl(HANDLE engineHandle);
 
     bool addFilters(HANDLE engineHandle, const wchar_t *connectingIp, const std::vector<std::wstring> &ips,
-                    const std::vector<std::wstring> &windscribeOnlyIps, bool bAllowLocalTraffic, bool bIsCustomConfig);
+                    const std::vector<std::wstring> &windscribeOnlyIps, bool bAllowLocalTraffic, bool bIsCustomConfig,
+                    bool bHoldLanPermit);
     void addPermitFilterForVpnAndSystemServices(HANDLE engineHandle, const wchar_t *ip);
     void addPermitFilterForAppsIds(HANDLE engineHandle);
     void addPermitFilterForSplitRoutingWhitelistIps(HANDLE engineHandle);
