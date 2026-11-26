@@ -635,7 +635,210 @@ void testOneFailedDeletionAbortsAndRetries()
     VERIFY(scoped_permits::deleteRecordedFilters(std::vector<uint64_t>{12345}, deleteById));
 }
 
+// FirewallFilter's split-tunnel setters and periodic retry, with Windows reduced to the filters it
+// holds: each setter changes its part of the request and syncs, as FirewallFilter does.
+using SplitState = scoped_permits::SplitTunnelState<std::vector<std::string>, std::vector<std::string>>;
+struct FakeSplitTunnelFirewall {
+    scoped_permits::SplitTunnelFilterSync<SplitState> sync;
+    SplitState installed;  // the filters Windows holds, in effective() form
+    scoped_permits::FirewallStatus status = scoped_permits::FirewallStatus::kOn;
+    int failNextApplies = 0;
+    int attempts = 0;
+
+    void syncNow()
+    {
+        switch (sync.step(status)) {
+        case scoped_permits::SplitTunnelStep::kApply:
+            ++attempts;
+            if (failNextApplies > 0) {
+                --failNextApplies;  // aborted: Windows keeps what it had
+                sync.onFailed();
+            } else {
+                installed = sync.requested().effective();
+                sync.onApplied();
+            }
+            break;
+        case scoped_permits::SplitTunnelStep::kFirewallOff:
+            installed = SplitState{};
+            break;
+        default:
+            break;
+        }
+    }
+    void setEnabled(bool isExclusive)
+    {
+        sync.request().isEnabled = true;
+        sync.request().isExclusive = isExclusive;
+        syncNow();
+    }
+    void setDisabled() { sync.request().isEnabled = false; syncNow(); }
+    void setApps(const std::vector<std::string> &apps) { sync.request().apps = apps; syncNow(); }
+    void setIps(const std::vector<std::string> &ips) { sync.request().ips = ips; syncNow(); }
+    void retry()
+    {
+        if (sync.isPending()) {
+            syncNow();
+        }
+    }
+    void firewallOn(bool isSplitTunnelComplete = true)
+    {
+        installed = isSplitTunnelComplete ? sync.requested().effective() : SplitState{};
+        sync.onFirewallRebuilt(isSplitTunnelComplete);
+    }
+    void firewallOff()
+    {
+        installed = SplitState{};
+        status = scoped_permits::FirewallStatus::kOff;
+        sync.onFirewallOff();
+    }
+};
+
+void testSplitTunnelNormalCallOrder()
+{
+    // SplitTunneling::updateState: the app list first (split tunneling still off), then the mode.
+    FakeSplitTunnelFirewall fw;
+    fw.setApps({"throne.exe"});
+    VERIFY(fw.attempts == 0);  // nothing to change while disabled
+    VERIFY(!fw.sync.isPending());
+    fw.setIps({"203.0.113.7/32"});
+    fw.setEnabled(true);
+    VERIFY(fw.attempts == 1);
+    VERIFY(fw.installed.isEnabled && fw.installed.isExclusive);
+    VERIFY((fw.installed.apps == std::vector<std::string>{"throne.exe"}));
+    VERIFY((fw.installed.ips == std::vector<std::string>{"203.0.113.7/32"}));
+    VERIFY(!fw.sync.isPending());
+
+    // The same mode again (a refresh): nothing to rebuild.
+    fw.setEnabled(true);
+    VERIFY(fw.attempts == 1);
+
+    // Inclusive mode permits every program: the lists do not change the filters.
+    fw.setEnabled(false);
+    VERIFY(fw.attempts == 2 && fw.installed.isEnabled && !fw.installed.isExclusive && fw.installed.apps.empty());
+    fw.setApps({"throne.exe", "chrome.exe"});
+    VERIFY(fw.attempts == 2);
+    fw.setDisabled();
+    VERIFY(fw.attempts == 3 && fw.installed == SplitState{});
+}
+
+void testModeRefreshKeepsPendingAppRemoval()
+{
+    // Sequence 1: Throne removed from the exclusions, the deletion fails, then the usual mode refresh.
+    FakeSplitTunnelFirewall fw;
+    fw.setApps({"throne.exe", "chrome.exe"});
+    fw.setEnabled(true);
+    VERIFY((fw.installed.apps == std::vector<std::string>{"throne.exe", "chrome.exe"}));
+
+    fw.failNextApplies = 1;
+    fw.setApps({"chrome.exe"});
+    VERIFY((fw.installed.apps == std::vector<std::string>{"throne.exe", "chrome.exe"}));  // old permits stay
+    VERIFY(fw.sync.isPending());
+
+    // The mode refresh builds from the latest request: Throne's permit goes, it does not come back.
+    fw.setEnabled(true);
+    VERIFY((fw.installed.apps == std::vector<std::string>{"chrome.exe"}));
+    VERIFY(!fw.sync.isPending());
+
+    // The same with the refresh failing too: the periodic retry applies the latest list.
+    fw.failNextApplies = 2;
+    fw.setApps({});
+    fw.setEnabled(true);
+    VERIFY((fw.installed.apps == std::vector<std::string>{"chrome.exe"}));
+    VERIFY(fw.sync.isPending());
+    fw.retry();
+    VERIFY(fw.installed.apps.empty() && fw.installed.isEnabled);
+    VERIFY(!fw.sync.isPending());
+}
+
+void testWithdrawnFailedAdditionIsNotRetried()
+{
+    // Sequence 2: a VLESS server IP added to the exclusions, the update fails, then withdrawn.
+    FakeSplitTunnelFirewall fw;
+    fw.setEnabled(true);
+    const int attempts = fw.attempts;
+
+    fw.failNextApplies = 1;
+    fw.setIps({"198.51.100.20/32"});
+    VERIFY(fw.installed.ips.empty());
+    VERIFY(fw.sync.isPending());
+
+    fw.setIps({});
+    VERIFY(!fw.sync.isPending());  // back to what Windows has: nothing to do
+    VERIFY(fw.attempts == attempts + 1);
+    for (int i = 0; i < 3; ++i) {
+        fw.retry();
+    }
+    VERIFY(fw.installed.ips.empty());
+    VERIFY(fw.attempts == attempts + 1);
+}
+
+void testFailedStatusQueryKeepsChangePending()
+{
+    // Sequence 3: an IP removed while the firewall's state cannot be read.
+    FakeSplitTunnelFirewall fw;
+    fw.setIps({"198.51.100.20/32"});
+    fw.setEnabled(true);
+    VERIFY((fw.installed.ips == std::vector<std::string>{"198.51.100.20/32"}));
+
+    fw.status = scoped_permits::FirewallStatus::kUnknown;
+    fw.setIps({});
+    VERIFY((fw.installed.ips == std::vector<std::string>{"198.51.100.20/32"}));  // not read as "off"
+    VERIFY(fw.sync.isPending());
+    fw.retry();
+    VERIFY(fw.sync.isPending());
+
+    // Sending the same list again once the state can be read removes the permit.
+    fw.status = scoped_permits::FirewallStatus::kOn;
+    fw.setIps({});
+    VERIFY(fw.installed.ips.empty());
+    VERIFY(!fw.sync.isPending());
+
+    // And so does the periodic retry on its own.
+    fw.setIps({"198.51.100.20/32"});
+    fw.status = scoped_permits::FirewallStatus::kUnknown;
+    fw.setIps({});
+    fw.status = scoped_permits::FirewallStatus::kOn;
+    fw.retry();
+    VERIFY(fw.installed.ips.empty());
+    VERIFY(!fw.sync.isPending());
+}
+
+void testSplitTunnelFollowsFirewallRebuilds()
+{
+    FakeSplitTunnelFirewall fw;
+    fw.setApps({"throne.exe"});
+    fw.setEnabled(true);
+
+    // Firewall off: no filters, nothing to retry; changes meanwhile wait for the next build.
+    fw.firewallOff();
+    fw.setApps({"chrome.exe"});
+    VERIFY(!fw.sync.isPending());
+    const int attempts = fw.attempts;
+    fw.retry();
+    VERIFY(fw.attempts == attempts);
+
+    // The firewall's build uses the latest request.
+    fw.status = scoped_permits::FirewallStatus::kOn;
+    fw.firewallOn();
+    VERIFY((fw.installed.apps == std::vector<std::string>{"chrome.exe"}));
+    VERIFY(!fw.sync.isPending());
+
+    // A build that committed without a split-tunnel permit is rebuilt by the retry.
+    fw.firewallOn(false);
+    VERIFY(fw.sync.isPending());
+    fw.retry();
+    VERIFY((fw.installed.apps == std::vector<std::string>{"chrome.exe"}));
+    VERIFY(!fw.sync.isPending());
+
+    // The firewall removed behind FirewallFilter's back (removal tool): found off at the next sync.
+    fw.installed = SplitState{};
+    fw.status = scoped_permits::FirewallStatus::kOff;
+    fw.setApps({"throne.exe"});
+    VERIFY(!fw.sync.isPending() && fw.sync.applied() == SplitState{});
+}
+
 } // namespace
+
 
 int main()
 {
@@ -657,6 +860,11 @@ int main()
     testMainFirewallCommitNeedsBothDefaultBlocks();
     testFailedRebuildKeepsSplitTunnelIds();
     testOneFailedDeletionAbortsAndRetries();
+    testSplitTunnelNormalCallOrder();
+    testModeRefreshKeepsPendingAppRemoval();
+    testWithdrawnFailedAdditionIsNotRetried();
+    testFailedStatusQueryKeepsChangePending();
+    testSplitTunnelFollowsFirewallRebuilds();
     if (g_failures == 0) {
         printf("All scoped permit tests passed.\n");
     }

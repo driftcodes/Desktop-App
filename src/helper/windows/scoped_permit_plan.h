@@ -485,4 +485,110 @@ private:
     std::set<types::IpAddress> excluded_;
 };
 
+// The main firewall's state as read from Windows: a failed query is neither on nor off.
+enum class FirewallStatus { kOn, kOff, kUnknown };
+
+// Split-tunnel settings: the mode and the excluded (exclusive mode) programs and addresses.
+template <class Apps, class Ips>
+struct SplitTunnelState {
+    bool isEnabled = false;
+    bool isExclusive = false;
+    Apps apps {};
+    Ips ips {};
+
+    // What the firewall's split-tunnel filters are built from: none while disabled; in inclusive mode
+    // one permit for every program, so the lists do not matter.
+    SplitTunnelState effective() const
+    {
+        if (!isEnabled) {
+            return SplitTunnelState{};
+        }
+        if (!isExclusive) {
+            SplitTunnelState s;
+            s.isEnabled = true;
+            return s;
+        }
+        return *this;
+    }
+    bool operator==(const SplitTunnelState &o) const
+    {
+        return isEnabled == o.isEnabled && isExclusive == o.isExclusive && apps == o.apps && ips == o.ips;
+    }
+    bool operator!=(const SplitTunnelState &o) const { return !(*this == o); }
+};
+
+enum class SplitTunnelStep {
+    kNothing,      // the filters in place match the latest request
+    kFirewallOff,  // the firewall is off, so none are in place; its next build uses the request
+    kApply,       // rebuild them from the latest request, in one transaction
+    kRetryLater   // they differ, but the firewall's state could not be read: still pending
+};
+
+// The split-tunnel filters of the main firewall: the latest settings requested (each setter changes
+// its part) apart from what Windows has confirmed (the last committed build). Every attempt builds
+// from the latest combined request, so a later call (e.g. the mode refresh that follows an app list
+// change) carries an earlier change that failed, withdrawing a change that failed leaves nothing to
+// retry, and a change made while the firewall's state is unknown stays pending until it can be read.
+template <class State>
+class SplitTunnelFilterSync
+{
+public:
+    // The request, to change part of it.
+    State &request()
+    {
+        isWaitingForFirewall_ = false;  // a new request: read the firewall's state again
+        return requested_;
+    }
+    const State &requested() const { return requested_; }
+    const State &applied() const { return applied_; }
+
+    bool isInSync() const { return !isDirty_ && applied_ == requested_.effective(); }
+    // Whether the periodic retry has anything to do.
+    bool isPending() const { return !isInSync() && !isWaitingForFirewall_; }
+
+    SplitTunnelStep step(FirewallStatus status)
+    {
+        if (isInSync()) {
+            return SplitTunnelStep::kNothing;
+        }
+        if (status == FirewallStatus::kOff) {
+            // No firewall, no filters; the next firewall build uses the request (onFirewallRebuilt).
+            applied_ = State{};
+            isDirty_ = false;
+            isWaitingForFirewall_ = true;
+            return SplitTunnelStep::kFirewallOff;
+        }
+        return status == FirewallStatus::kOn ? SplitTunnelStep::kApply : SplitTunnelStep::kRetryLater;
+    }
+
+    // The rebuild from requested() committed.
+    void onApplied()
+    {
+        applied_ = requested_.effective();
+        isDirty_ = false;
+    }
+    // A rebuild that did not commit leaves Windows (and applied()) as it was: nothing to record.
+    void onFailed() {}
+    // The whole firewall was rebuilt from requested() and committed; isComplete false when a
+    // split-tunnel permit could not be added (rebuilt again by the retry).
+    void onFirewallRebuilt(bool isComplete)
+    {
+        applied_ = requested_.effective();
+        isDirty_ = !isComplete;
+        isWaitingForFirewall_ = false;
+    }
+    void onFirewallOff()
+    {
+        applied_ = State{};
+        isDirty_ = false;
+        isWaitingForFirewall_ = true;
+    }
+
+private:
+    State requested_ {};
+    State applied_ {};
+    bool isDirty_ = false;               // the filters in place are incomplete
+    bool isWaitingForFirewall_ = false;  // the firewall is off: nothing to retry until it is rebuilt
+};
+
 } // namespace scoped_permits

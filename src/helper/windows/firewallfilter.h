@@ -6,6 +6,7 @@
 #include "apps_ids.h"
 #include "fwpm_wrapper.h"
 #include "types/ipaddress.h"
+#include "scoped_permit_plan.h"
 
 #define UUID_LAYER L"367016b3-3af8-4966-8442-d8bb6435f4a0"
 #define FIREWALL_SUBLAYER_NAMEW WS_APP_IDENTIFIER_W L"Firewall"
@@ -34,11 +35,13 @@ public:
     // blocks DNS to IPv6 link-local: while no DNS baseline is in place they would let any program
     // query a router's DNS.
     bool holdLanPermit();
-    // Retries a split-tunnel filter update (app or IP exclusions) that failed; called periodically.
+    // Retries bringing the split-tunnel filters (app and IP exclusions) in line with the latest
+    // settings, after an update that failed or could not read the firewall's state; called periodically.
     void retryPendingSplitTunnelUpdate();
     bool currentStatus();
 
-    // split tunnelling parameters
+    // split tunnelling parameters: each changes its part of the latest request, then the filters are
+    // rebuilt from the whole request (see scoped_permits::SplitTunnelFilterSync)
     void setSplitTunnelingEnabled(bool isExclusiveMode);
     void setSplitTunnelingDisabled();
 
@@ -61,17 +64,21 @@ private:
     explicit FirewallFilter(FwpmWrapper &fwmpWrapper);
 
     bool currentStatusImpl(HANDLE engineHandle);
+    scoped_permits::FirewallStatus firewallStatusImpl(HANDLE engineHandle);
     void offImpl(HANDLE engineHandle);
 
     bool addFilters(HANDLE engineHandle, const wchar_t *connectingIp, const std::vector<std::wstring> &ips,
                     const std::vector<std::wstring> &windscribeOnlyIps, bool bAllowLocalTraffic, bool bIsCustomConfig,
-                    bool bHoldLanPermit, bool areDefaultBlocksAdded[2]);
+                    bool bHoldLanPermit, bool areDefaultBlocksAdded[2], bool *isSplitTunnelComplete);
     void addPermitFilterForVpnAndSystemServices(HANDLE engineHandle, const wchar_t *ip);
     bool addLinkLocalDnsBlock(HANDLE engineHandle);
     // Runs body in one WFP transaction; if it does not commit, the recorded split-tunnel filter ids
     // are put back as they were (Windows keeps the old filters). Returns whether it committed.
     // body returns false when a step failed (e.g. a filter could not be deleted): aborted then.
     bool runTransaction(const std::function<bool()> &body);
+    // The split-tunnel filters (from the latest request) and their sync; with mutex_ held.
+    bool addSplitTunnelingFilters(HANDLE engineHandle);
+    void syncSplitTunnelFilters();
     bool addPermitFilterForAppsIds(HANDLE engineHandle);
     bool addPermitFilterForSplitRoutingWhitelistIps(HANDLE engineHandle);
 
@@ -79,18 +86,13 @@ private:
     bool removeAppsSplitTunnelingFilter(HANDLE engineHandle);
     bool removeIpsSplitTunnelingFilter(HANDLE engineHandle);
     bool removeAllSplitTunnelingFilters(HANDLE engineHandle);
-    // The split-tunnel update that failed last, retried by retryPendingSplitTunnelUpdate(); cleared
-    // by any newer update.
-    std::function<void()> pendingSplitTunnelUpdate_;
 
     std::vector<std::wstring> tapAdapters_;
 
-    bool isSplitTunnelingEnabled_;
-    bool isSplitTunnelingExclusiveMode_;
-    AppsIds appsIds_;
+    // The split-tunnel settings requested (mode, excluded apps and IPs) and what Windows confirmed.
+    scoped_permits::SplitTunnelFilterSync<scoped_permits::SplitTunnelState<AppsIds, std::vector<types::IpAddressRange>>> splitTunnel_;
     AppsIds vpnAppsIds_;
     AppsIds windscribeAppsIds_;
-    std::vector<types::IpAddressRange> splitRoutingIps_;
 
     std::vector<UINT64> filterIdsApps_;
     std::vector<UINT64> filterIdsSplitRoutingIps_;

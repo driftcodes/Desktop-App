@@ -174,6 +174,11 @@ Emergency Connect is unchanged and never uses the proxy.
   split tunneling list, then rebuilds it; a Windscribe tunnel adapter present meanwhile only gets its
   own permit added, so Throne keeps its saved one. The DNS leak filter itself does not persist; it is set up
   again when you connect. This has not been confirmed on a real Windows restart yet.
+- **Changing split tunneling exclusions.** The firewall's split-tunnel permits follow the latest
+  settings as a whole (mode, apps and IPs). If Windows refuses an update, the permits in place stay
+  and the helper retries every few seconds with whatever the settings are by then. A later change
+  includes the one that failed, and taking back a change that failed leaves nothing to retry. If the
+  firewall's state cannot be read, the change stays pending instead of being treated as done.
 
 ### Reconnecting
 
