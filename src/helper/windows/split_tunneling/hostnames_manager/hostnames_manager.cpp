@@ -48,24 +48,40 @@ void HostnamesManager::enable(const types::IpAddress &gatewayIp,
 void HostnamesManager::disable()
 {
     spdlog::debug("HostnamesManager::disable(), begin");
+    bool wasEnabled = false;
     {
         std::lock_guard<std::recursive_mutex> guard(mutex_);
 
-        if (!isEnabled_)
+        // Also while disabled, as long as an earlier clear left a route behind.
+        if (!route_set::shouldClearOnDisable(isEnabled_, ipRoutes_.hasLeftovers()))
         {
             return;
         }
-        ipRoutes_.clear();
+        wasEnabled = isEnabled_;
+        if (!ipRoutes_.clear()) {
+            spdlog::error("HostnamesManager::disable(), a route could not be deleted; retrying");
+        }
         isEnabled_ = false;
     }
-    dnsResolver_.cancelAll();
+    if (wasEnabled) {
+        dnsResolver_.cancelAll();
+    }
     spdlog::debug("HostnamesManager::disable(), end");
 }
 
 bool HostnamesManager::areManualRoutesApplied()
 {
     std::lock_guard<std::recursive_mutex> guard(mutex_);
-    return !isEnabled_ || ipRoutes_.areApplied(ipsLatest_);
+    // While disabled: nothing is wanted, but a route left behind is not cleaned up yet.
+    return isEnabled_ ? ipRoutes_.areApplied(ipsLatest_) : !ipRoutes_.hasLeftovers();
+}
+
+void HostnamesManager::retryPendingCleanup()
+{
+    std::lock_guard<std::recursive_mutex> guard(mutex_);
+    if (!isEnabled_ && ipRoutes_.hasLeftovers() && ipRoutes_.clear()) {
+        spdlog::info("HostnamesManager: the routes left behind are deleted now");
+    }
 }
 
 void HostnamesManager::setSettings(bool isExclude,

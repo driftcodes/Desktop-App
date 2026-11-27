@@ -21,6 +21,8 @@ public:
                      const std::vector<std::string>& hosts, bool isAllowLanTraffic);
     bool setConnectStatus(ConnectStatus& connectStatus);
     bool updateState();
+    // Deletes split tunneling routes left behind by a failed cleanup (called periodically).
+    void retryPendingRouteCleanup() { hostnamesManager_.retryPendingCleanup(); }
 
     // What this helper applies, for the client to compare with what it asked for: a helper that
     // restarted runs on its defaults (split tunneling off, no apps) until the client sends them again.

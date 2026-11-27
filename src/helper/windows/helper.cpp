@@ -67,6 +67,7 @@ bool Helper::onInit()
         FirewallFilter::instance().retryPendingSplitTunnelUpdate();
         retryPendingFirewallWork();
         Ipv6Firewall::instance().retryPending();
+        SplitTunneling::instance().retryPendingRouteCleanup();
     });
 
     setStatus(SERVICE_START_PENDING);

@@ -193,14 +193,22 @@ Emergency Connect is unchanged and never uses the proxy.
   tunneling settings, the app disconnects with an error you can retry. It no longer stays connected
   and turns split tunneling off in Preferences: your settings and exclusions are kept for the next
   attempt. Without a proxy, or in Inclusive mode, the official app's handling is unchanged.
-  "Applied" means the helper reports exactly your settings: the mode, the excluded programs (each
-  one identified by Windows), and the excluded IPs and hostnames (such as the VLESS server's), with
-  the routes for those IPs actually in place. A destination that needs no route (the local subnet,
-  loopback) or whose identical route already exists counts as in place. A route that cannot be
-  deleted, such as an old VLESS IP's, stays tracked and is deleted again on the next update.
-  Hostnames are resolved in the background and not waited for. If it does not (for example, the helper service restarted and lost them),
-  the app sends them again once before giving up. A program in the list that no longer exists on disk
-  is skipped rather than counted as a failure.
+  "Applied" means the helper has received exactly your settings: the mode, the excluded programs,
+  and the excluded IP and hostname lists (such as the VLESS server's). It also means every excluded
+  program that exists has been identified by Windows, and every valid excluded IP has its route in
+  place. If not (for example, the helper service restarted and lost them), the app sends them again
+  once before giving up.
+  - A route counts as in place when Windscribe created it, when the same route (prefix, interface
+    and gateway) already existed, or when none is needed: the local subnet or loopback, or an IPv6
+    address on a network without IPv6.
+  - No IPv4 gateway, or another program's route for that address through a different gateway, does
+    not count. The other program's route is left alone.
+  - A route that cannot be deleted, such as an old VLESS IP's, stays tracked and is deleted again
+    later, even while split tunneling is off.
+  - Malformed IP or hostname entries are skipped as before, not reported; a correctly entered
+    address is never skipped.
+  - Hostnames are resolved in the background and not waited for.
+  - A program in the list that no longer exists on disk is skipped rather than counted as a failure.
 - **IPv6 while connected.** Windows blocks IPv6 outside the tunnel whenever you are connected, even
   with the firewall off. The app now waits for that block, as rebuilt for the final split tunneling
   settings, before it shows Connected. If the block cannot be installed (after one retry), it

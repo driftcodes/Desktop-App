@@ -34,6 +34,8 @@ public:
                 const std::vector<types::IpAddressRange> &ips,
                 bool isExclude);
     bool clear();
+    // A route that should be gone could not be deleted yet.
+    bool hasLeftovers();
     // Whether these destinations are in place (see route_set::RouteSet::isApplied).
     bool areApplied(const std::vector<types::IpAddressRange> &ips);
 

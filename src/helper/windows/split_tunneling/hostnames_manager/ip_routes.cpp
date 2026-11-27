@@ -156,21 +156,24 @@ bool IpRoutes::setIps(const types::IpAddress &gatewayIp,
                 return true;
             }
         }
-        // No gateway of its family: that family cannot leave this adapter at all.
-        if (ip.isV4() && (!gatewayIp.isValid() || !gatewayIp.isV4())) {
-            spdlog::warn("IpRoutes::setIps(), no IPv4 gateway for v4 destination {}", ip.toString());
+        const bool hasGatewayV4 = gatewayIp.isValid() && gatewayIp.isV4();
+        const bool hasGatewayV6 = gatewayIpV6.isValid() && gatewayIpV6.isV6();
+        if (route_set::needsNoRouteForFamily(ip.isV6(), hasGatewayV4, hasGatewayV6)) {
+            spdlog::warn("IpRoutes::setIps(), no IPv6 on this network for v6 destination {}", ip.toString());
             return true;
         }
-        if (ip.isV6() && (!gatewayIpV6.isValid() || !gatewayIpV6.isV6())) {
-            spdlog::warn("IpRoutes::setIps(), no IPv6 gateway for v6 destination {}", ip.toString());
-            return true;
-        }
-        return !ip.isV4() && !ip.isV6();
+        return false;
     };
 
     const auto create = [&](const types::IpAddressRange &ip, MIB_IPFORWARD_ROW2 &row) {
         const types::IpAddress *gw = nullptr;
         ULONG metric = 0;
+        if ((ip.isV4() && !(gatewayIp.isValid() && gatewayIp.isV4())) ||
+            (ip.isV6() && !(gatewayIpV6.isValid() && gatewayIpV6.isV6())) || (!ip.isV4() && !ip.isV6())) {
+            // No gateway to route it through: not in place (retried with the next update).
+            spdlog::error("IpRoutes::setIps(), no gateway of its family for {}", ip.toString());
+            return route_set::CreateResult::kFailed;
+        }
         if (ip.isV4()) {
             gw = &gatewayIp;
             if (!haveMetricV4) {
@@ -200,9 +203,20 @@ bool IpRoutes::setIps(const types::IpAddress &gatewayIp,
             return route_set::CreateResult::kCreated;
         }
         if (status == ERROR_OBJECT_ALREADY_EXISTS) {
-            // The same route (destination, next hop, interface) is there already: the intended path.
-            spdlog::info("IpRoutes::setIps(), the route for {} already exists", ip.toString());
-            return route_set::CreateResult::kAlreadyThere;
+            // A route for this prefix on this interface exists; it is the intended path only through
+            // the same next hop. Read back by prefix, interface and next hop: found means exactly ours.
+            MIB_IPFORWARD_ROW2 existing = row;
+            const DWORD lookup = GetIpForwardEntry2(&existing);
+            if (lookup == NO_ERROR && existing.InterfaceIndex == row.InterfaceIndex &&
+                existing.DestinationPrefix.PrefixLength == row.DestinationPrefix.PrefixLength &&
+                std::memcmp(&existing.NextHop, &row.NextHop, sizeof(row.NextHop)) == 0) {
+                spdlog::info("IpRoutes::setIps(), the route for {} already exists", ip.toString());
+                return route_set::CreateResult::kAlreadyThere;
+            }
+            // Through another next hop: someone else's, left alone; not in place.
+            spdlog::error("IpRoutes::setIps(), a route for {} through another next hop exists (lookup {}); not ours to replace",
+                          ip.toString(), lookup);
+            return route_set::CreateResult::kFailed;
         }
         spdlog::error("IpRoutes::setIps(), CreateIpForwardEntry2 failed for {}: {}", ip.toString(), status);
         return route_set::CreateResult::kFailed;
@@ -240,6 +254,12 @@ route_set::DeleteResult IpRoutes::removeRoute(const MIB_IPFORWARD_ROW2 &row)
     // Kept and deleted again on the next update or clear.
     spdlog::error("IpRoutes: DeleteIpForwardEntry2 failed: {}", status);
     return route_set::DeleteResult::kFailed;
+}
+
+bool IpRoutes::hasLeftovers()
+{
+    std::lock_guard<std::recursive_mutex> guard(mutex_);
+    return routes_.hasLeftovers();
 }
 
 bool IpRoutes::clear()

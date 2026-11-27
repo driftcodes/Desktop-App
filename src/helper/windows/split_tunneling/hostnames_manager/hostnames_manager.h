@@ -29,6 +29,8 @@ public:
     // Whether the routes for the manual IP exclusions (e.g. the VLESS server) are in place; true
     // while disabled. Resolved hostnames are not waited for.
     bool areManualRoutesApplied();
+    // While disabled: deletes a route an earlier clear left behind (called periodically).
+    void retryPendingCleanup();
 
     // Dual-stack: ips holds IPv4 and/or IPv6 ranges; family is dispatched by isV4()/isV6().
     void setSettings(bool isExclude,

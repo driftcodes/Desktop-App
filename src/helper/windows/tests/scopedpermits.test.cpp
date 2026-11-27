@@ -2,6 +2,7 @@
 // (scoped_permit_plan.h). No external test framework; returns the number of failed checks.
 
 #include <cstdio>
+#include <map>
 #include <set>
 #include <string>
 #include <vector>
@@ -1296,40 +1297,64 @@ void testIpv6MissingPermitRetriedWithBlockKept()
     VERIFY(!update.sync.isPending());
 }
 
-// IpRoutes with Windows' routing table reduced to a set of (destination, gateway) routes.
+// IpRoutes with Windows' routing table reduced to its routes keyed as Windows keys duplicates: by
+// destination prefix (one interface here), each with its next hop.
 struct FakeRoutingTable {
-    std::set<std::pair<std::string, std::string>> routes;
+    std::map<std::string, std::string> routes;  // prefix -> next hop
     std::set<std::string> onLink = {"127.0.0.0/8", "192.168.31.0/24"};
     std::set<std::string> failCreate;
     std::set<std::string> failDelete;
     std::string gateway = "192.168.31.1";
-    route_set::RouteSet<std::string, std::pair<std::string, std::string>> set;
+    bool hasGatewayV4 = true;
+    bool hasGatewayV6 = false;
+    using Row = std::pair<std::string, std::string>;
+    route_set::RouteSet<std::string, Row> set;
 
+    static bool isV6(const std::string &ip) { return ip.find(':') != std::string::npos; }
     bool setIps(const std::set<std::string> &ips)
     {
         return set.apply(
-            ips, [&](const std::string &ip) { return onLink.count(ip) != 0; },
-            [&](const std::string &ip, std::pair<std::string, std::string> &row) {
-                row = {ip, gateway};
-                if (failCreate.count(ip) != 0) {
+            ips,
+            [&](const std::string &ip) {
+                return onLink.count(ip) != 0 || route_set::needsNoRouteForFamily(isV6(ip), hasGatewayV4, hasGatewayV6);
+            },
+            [&](const std::string &ip, Row &row) {
+                // As IpRoutes' create: no gateway of its family, a refusal, or a duplicate prefix
+                // read back to compare its next hop.
+                if ((isV6(ip) && !hasGatewayV6) || (!isV6(ip) && !hasGatewayV4) || failCreate.count(ip) != 0) {
                     return route_set::CreateResult::kFailed;
                 }
-                return routes.insert(row).second ? route_set::CreateResult::kCreated : route_set::CreateResult::kAlreadyThere;
+                row = {ip, gateway};
+                const auto it = routes.find(ip);
+                if (it != routes.end()) {
+                    return it->second == gateway ? route_set::CreateResult::kAlreadyThere : route_set::CreateResult::kFailed;
+                }
+                routes[ip] = gateway;
+                return route_set::CreateResult::kCreated;
             },
-            [&](const std::pair<std::string, std::string> &row) { return remove(row); });
+            [&](const Row &row) { return remove(row); });
     }
-    route_set::DeleteResult remove(const std::pair<std::string, std::string> &row)
+    route_set::DeleteResult remove(const Row &row)
     {
         if (failDelete.count(row.first) != 0) {
             return route_set::DeleteResult::kFailed;
         }
-        return routes.erase(row) == 1 ? route_set::DeleteResult::kDeleted : route_set::DeleteResult::kNotFound;
+        const auto it = routes.find(row.first);
+        if (it == routes.end() || it->second != row.second) {
+            return route_set::DeleteResult::kNotFound;
+        }
+        routes.erase(it);
+        return route_set::DeleteResult::kDeleted;
     }
     bool clear()
     {
-        return set.clear([&](const std::pair<std::string, std::string> &row) { return remove(row); });
+        return set.clear([&](const Row &row) { return remove(row); });
     }
-    bool hasRoute(const std::string &ip) const { return routes.count({ip, gateway}) != 0; }
+    bool hasRoute(const std::string &ip) const
+    {
+        const auto it = routes.find(ip);
+        return it != routes.end() && it->second == gateway;
+    }
 };
 
 void testVlessRouteCreationFailureIsReported()
@@ -1354,7 +1379,7 @@ void testVlessRouteCreationFailureIsReported()
     // An identical route that is already there (not ours) is the intended path, and is not removed
     // when the list changes.
     FakeRoutingTable existing;
-    existing.routes.insert({"198.51.100.20/32", existing.gateway});
+    existing.routes["198.51.100.20/32"] = existing.gateway;
     VERIFY(existing.setIps({"198.51.100.20/32"}));
     VERIFY(existing.setIps({}));
     VERIFY(existing.hasRoute("198.51.100.20/32"));
@@ -1384,7 +1409,79 @@ void testOldVlessRouteDeletionIsRetried()
     VERIFY(table.routes.empty());
 }
 
+void testMissingGatewayIsNotAnExclusion()
+{
+    // An off-LAN VLESS IPv4 address and no usable IPv4 gateway: not in place (no route, nothing
+    // verified), so the engine retries and then ends a proxied attempt.
+    FakeRoutingTable table;
+    table.hasGatewayV4 = false;
+    VERIFY(!table.setIps({"203.0.113.40/32"}));
+    VERIFY(table.routes.empty());
+    // Directly attached ones (loopback) still need no route.
+    VERIFY(table.setIps({"127.0.0.0/8"}));
+
+    // IPv6 on a network without IPv6 (an IPv4 gateway, none for IPv6): nothing to route.
+    FakeRoutingTable v4only;
+    VERIFY(v4only.setIps({"2001:db8::1/128"}));
+    // But with no gateway at all, an IPv6 destination is not in place either.
+    v4only.hasGatewayV4 = false;
+    VERIFY(!v4only.setIps({"2001:db8::1/128"}));
+
+    // The gateway is back: the route is created on the next update.
+    table.hasGatewayV4 = true;
+    VERIFY(table.setIps({"203.0.113.40/32"}));
+    VERIFY(table.hasRoute("203.0.113.40/32"));
+}
+
+void testConflictingRouteIsNotConfirmed()
+{
+    // Another program's route for the VLESS IP's prefix on the same interface, through another
+    // gateway: Windows reports "already exists", but it is not the intended path.
+    FakeRoutingTable table;
+    table.routes["203.0.113.40/32"] = "10.0.0.1";
+    VERIFY(!table.setIps({"203.0.113.40/32"}));
+    VERIFY(table.routes["203.0.113.40/32"] == "10.0.0.1");  // left alone
+    VERIFY(table.setIps({}));                               // and not deleted as ours
+    VERIFY(table.routes["203.0.113.40/32"] == "10.0.0.1");
+
+    // Through the same gateway, it is.
+    table.routes["203.0.113.40/32"] = table.gateway;
+    VERIFY(table.setIps({"203.0.113.40/32"}));
+}
+
+void testFailedCleanupWhileDisabledIsRetried()
+{
+    // HostnamesManager::disable() twice, the first clear failing to delete the old VLESS route.
+    FakeRoutingTable table;
+    bool isEnabled = true;
+    const auto disable = [&]() {
+        if (!route_set::shouldClearOnDisable(isEnabled, table.set.hasLeftovers())) {
+            return;
+        }
+        table.clear();
+        isEnabled = false;
+    };
+    // As HostnamesManager::areManualRoutesApplied() while disabled.
+    const auto isCleanedUp = [&]() { return !table.set.hasLeftovers(); };
+
+    VERIFY(table.setIps({"198.51.100.20/32"}));
+    table.failDelete = {"198.51.100.20/32"};
+    disable();
+    VERIFY(table.hasRoute("198.51.100.20/32"));
+    VERIFY(!isCleanedUp());  // reported incomplete
+
+    // The second disable (split tunneling still off) retries it.
+    table.failDelete.clear();
+    disable();
+    VERIFY(!table.hasRoute("198.51.100.20/32"));
+    VERIFY(isCleanedUp());
+
+    // Disabled and clean: nothing to do.
+    VERIFY(!route_set::shouldClearOnDisable(false, false));
+}
+
 } // namespace
+
 
 
 
@@ -1427,6 +1524,9 @@ int main()
     testIpv6FinalCheckConfirmsRebuiltBlock();
     testVlessRouteCreationFailureIsReported();
     testOldVlessRouteDeletionIsRetried();
+    testMissingGatewayIsNotAnExclusion();
+    testConflictingRouteIsNotConfirmed();
+    testFailedCleanupWhileDisabledIsRetried();
     if (g_failures == 0) {
         printf("All scoped permit tests passed.\n");
     }
