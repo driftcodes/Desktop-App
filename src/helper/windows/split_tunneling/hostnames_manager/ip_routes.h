@@ -24,7 +24,8 @@ public:
 
     // isExclude: in exclude mode a destination that is already directly attached over a live
     // interface is left to its own on-link route instead of being pinned to the gateway — see
-    // collectOnLinkPrefixes(). Inclusive mode always installs the route, since the point there
+    // collectOnLinkRoutes() and route_set::directPath() (an on-link route on the Windscribe tunnel does not
+    // count). Loopback is never routed. Inclusive mode otherwise always installs the route, since the point there
     // is to pull the destination into the tunnel.
     // false if a route could not be created, or one that should go could not be deleted (it stays
     // tracked and is deleted again on the next call).

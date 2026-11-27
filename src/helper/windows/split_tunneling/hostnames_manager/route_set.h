@@ -31,6 +31,36 @@ inline bool shouldClearOnDisable(bool isEnabled, bool hasLeftovers)
 {
     return isEnabled || hasLeftovers;
 }
+
+// Whether a destination is reached directly (an on-link route, no gateway), from the routing table's
+// on-link routes. Only a route on an adapter that may carry it counts: the intended (physical)
+// adapter or another non-tunnel one, not the Windscribe tunnel, whose own on-link routes must not
+// stand in for an exclusion's path outside the tunnel. A table that could not be read gives no
+// answer (kUnknown: no route is created over what may be a directly attached subnet, and the
+// exclusion is not in place) except for loopback, which stays local whatever the table says.
+enum class DirectPath { kDirect, kNotDirect, kUnknown };
+
+template <typename Key>
+struct OnLinkRoute {
+    Key prefix;
+    bool isUsable;  // on the intended adapter, or on another adapter known not to be the tunnel
+};
+
+template <typename Key>
+inline DirectPath directPath(const Key &destination, bool isLoopbackDestination, bool isTableRead,
+                             const std::vector<OnLinkRoute<Key>> &onLinkRoutes)
+{
+    if (isLoopbackDestination) {
+        return DirectPath::kDirect;
+    }
+    for (const auto &route : onLinkRoutes) {
+        if (route.prefix == destination && route.isUsable) {
+            return DirectPath::kDirect;
+        }
+    }
+    return isTableRead ? DirectPath::kNotDirect : DirectPath::kUnknown;
+}
+
 enum class DeleteResult { kDeleted, kNotFound, kFailed };
 
 template <typename Key, typename Row>

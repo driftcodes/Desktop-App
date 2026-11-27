@@ -2,6 +2,7 @@
 #include <ws2ipdef.h>
 
 #include "ip_routes.h"
+#include "../../adapters_info.h"
 
 #include <cstring>
 #include <set>
@@ -90,9 +91,18 @@ types::IpAddressRange toRange(const IP_ADDRESS_PREFIX &prefix)
 // Windows resolves equal-prefix routes by effective metric (RouteMetric + InterfaceMetric), and the
 // exclusion rows below carry the physical interface metric in both terms, so they can outrank a
 // directly attached subnet's on-link row (metric 256 + interface metric) and hijack its traffic.
-std::set<types::IpAddressRange> collectOnLinkPrefixes()
+// Each route keeps whether its adapter may carry an exclusion (not the Windscribe tunnel), and each
+// family whether its table could be read at all.
+struct OnLinkScan {
+    std::vector<route_set::OnLinkRoute<types::IpAddressRange>> routes;
+    bool isReadV4 = false;
+    bool isReadV6 = false;
+};
+
+OnLinkScan collectOnLinkRoutes(unsigned long intendedIfIndex)
 {
-    std::set<types::IpAddressRange> result;
+    OnLinkScan result;
+    AdaptersInfo adapters;
     static const ADDRESS_FAMILY kFamilies[] = { AF_INET, AF_INET6 };
     for (const ADDRESS_FAMILY family : kFamilies) {
         PMIB_IPFORWARD_TABLE2 table = nullptr;
@@ -101,17 +111,36 @@ std::set<types::IpAddressRange> collectOnLinkPrefixes()
             spdlog::warn("IpRoutes: GetIpForwardTable2(family={}) failed with error: {}", static_cast<int>(family), dwErr);
             continue;
         }
+        (family == AF_INET ? result.isReadV4 : result.isReadV6) = true;
         for (ULONG i = 0; i < table->NumEntries; ++i) {
             const MIB_IPFORWARD_ROW2 &row = table->Table[i];
             if (!isOnLink(row) || !isInterfaceConnected(row.InterfaceIndex, family))
                 continue;
             const auto dest = toRange(row.DestinationPrefix);
-            if (dest.isValid())
-                result.insert(dest);
+            if (!dest.isValid())
+                continue;
+            // The intended adapter, or one known not to be the tunnel (unknown if the adapters could
+            // not be listed: then only the intended one counts).
+            const bool isUsable = row.InterfaceIndex == intendedIfIndex ||
+                                  (adapters.isListed() && !adapters.isAppVpnAdapter(row.InterfaceIndex));
+            result.routes.push_back({dest, isUsable});
         }
         FreeMibTable(table);
     }
     return result;
+}
+
+bool isLoopbackDestination(const types::IpAddressRange &ip)
+{
+    const types::IpAddress &address = ip.address();
+    if (address.isV4()) {
+        return address.bytes()[0] == 127;
+    }
+    if (address.isV6()) {
+        static const uint8_t kLoopbackV6[16] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
+        return std::memcmp(address.bytes(), kLoopbackV6, 16) == 0;
+    }
+    return false;
 }
 
 } // namespace
@@ -130,8 +159,20 @@ bool IpRoutes::setIps(const types::IpAddress &gatewayIp,
 
     // Fetched lazily: only exclude mode can collide with an existing on-link route, and only
     // when there is at least one new destination to install.
-    bool haveOnLinkPrefixes = false;
-    std::set<types::IpAddressRange> onLinkPrefixes;
+    bool haveOnLinkRoutes = false;
+    OnLinkScan onLink;
+    // Exclude mode: whether the destination is reached directly (see route_set::directPath).
+    const auto directPath = [&](const types::IpAddressRange &ip) {
+        if (!isExclude) {
+            return isLoopbackDestination(ip) ? route_set::DirectPath::kDirect : route_set::DirectPath::kNotDirect;
+        }
+        if (!haveOnLinkRoutes) {
+            onLink = collectOnLinkRoutes(ifIndex);
+            haveOnLinkRoutes = true;
+        }
+        return route_set::directPath(ip, isLoopbackDestination(ip), ip.isV6() ? onLink.isReadV6 : onLink.isReadV4,
+                                     onLink.routes);
+    };
 
     // Cache per-family metric — fetched lazily on first need.
     bool haveMetricV4 = false, haveMetricV6 = false;
@@ -145,16 +186,10 @@ bool IpRoutes::setIps(const types::IpAddress &gatewayIp,
     }
 
     const auto needsNoRoute = [&](const types::IpAddressRange &ip) {
-        if (isExclude) {
-            if (!haveOnLinkPrefixes) {
-                onLinkPrefixes = collectOnLinkPrefixes();
-                haveOnLinkPrefixes = true;
-            }
-            if (onLinkPrefixes.count(ip) != 0) {
-                // Already reached without a gateway (the local subnet, loopback): the intended path.
-                spdlog::info("IpRoutes::setIps(), {} is directly attached, keeping the existing on-link route", ip.toString());
-                return true;
-            }
+        if (directPath(ip) == route_set::DirectPath::kDirect) {
+            // Already reached without a gateway (the local subnet, loopback): the intended path.
+            spdlog::info("IpRoutes::setIps(), {} is directly attached, keeping the existing on-link route", ip.toString());
+            return true;
         }
         const bool hasGatewayV4 = gatewayIp.isValid() && gatewayIp.isV4();
         const bool hasGatewayV6 = gatewayIpV6.isValid() && gatewayIpV6.isV6();
@@ -168,6 +203,12 @@ bool IpRoutes::setIps(const types::IpAddress &gatewayIp,
     const auto create = [&](const types::IpAddressRange &ip, MIB_IPFORWARD_ROW2 &row) {
         const types::IpAddress *gw = nullptr;
         ULONG metric = 0;
+        if (directPath(ip) == route_set::DirectPath::kUnknown) {
+            // The routing table could not be read: it may be a directly attached subnet, which a
+            // gateway route would hijack. Not in place; retried with the next update.
+            spdlog::error("IpRoutes::setIps(), the routing table could not be read; not routing {}", ip.toString());
+            return route_set::CreateResult::kFailed;
+        }
         if ((ip.isV4() && !(gatewayIp.isValid() && gatewayIp.isV4())) ||
             (ip.isV6() && !(gatewayIpV6.isValid() && gatewayIpV6.isV6())) || (!ip.isV4() && !ip.isV6())) {
             // No gateway to route it through: not in place (retried with the next update).

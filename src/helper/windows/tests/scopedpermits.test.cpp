@@ -1301,7 +1301,10 @@ void testIpv6MissingPermitRetriedWithBlockKept()
 // destination prefix (one interface here), each with its next hop.
 struct FakeRoutingTable {
     std::map<std::string, std::string> routes;  // prefix -> next hop
-    std::set<std::string> onLink = {"127.0.0.0/8", "192.168.31.0/24"};
+    // On-link routes (isUsable false: on the Windscribe tunnel adapter), and whether the table reads.
+    std::vector<route_set::OnLinkRoute<std::string>> onLink = {{"127.0.0.0/8", true}, {"192.168.31.0/24", true}};
+    bool isTableRead = true;
+    int createAttempts = 0;
     std::set<std::string> failCreate;
     std::set<std::string> failDelete;
     std::string gateway = "192.168.31.1";
@@ -1311,16 +1314,26 @@ struct FakeRoutingTable {
     route_set::RouteSet<std::string, Row> set;
 
     static bool isV6(const std::string &ip) { return ip.find(':') != std::string::npos; }
+    static bool isLoopback(const std::string &ip) { return ip.rfind("127.", 0) == 0 || ip == "::1/128"; }
+    route_set::DirectPath directPath(const std::string &ip) const
+    {
+        return route_set::directPath(ip, isLoopback(ip), isTableRead, onLink);
+    }
     bool setIps(const std::set<std::string> &ips)
     {
         return set.apply(
             ips,
             [&](const std::string &ip) {
-                return onLink.count(ip) != 0 || route_set::needsNoRouteForFamily(isV6(ip), hasGatewayV4, hasGatewayV6);
+                return directPath(ip) == route_set::DirectPath::kDirect ||
+                       route_set::needsNoRouteForFamily(isV6(ip), hasGatewayV4, hasGatewayV6);
             },
             [&](const std::string &ip, Row &row) {
-                // As IpRoutes' create: no gateway of its family, a refusal, or a duplicate prefix
-                // read back to compare its next hop.
+                // As IpRoutes' create: an unreadable table, no gateway of its family, a refusal, or a
+                // duplicate prefix read back to compare its next hop.
+                ++createAttempts;
+                if (directPath(ip) == route_set::DirectPath::kUnknown) {
+                    return route_set::CreateResult::kFailed;
+                }
                 if ((isV6(ip) && !hasGatewayV6) || (!isV6(ip) && !hasGatewayV4) || failCreate.count(ip) != 0) {
                     return route_set::CreateResult::kFailed;
                 }
@@ -1480,7 +1493,46 @@ void testFailedCleanupWhileDisabledIsRetried()
     VERIFY(!route_set::shouldClearOnDisable(false, false));
 }
 
+void testOnLinkRouteOnTunnelDoesNotConfirmExclusion()
+{
+    // The VLESS server's exact /32 is on-link only on the Windscribe tunnel adapter: that is not the
+    // exclusion's path; its Wi-Fi route is created.
+    FakeRoutingTable table;
+    table.onLink.push_back({"203.0.113.40/32", false});
+    VERIFY(table.directPath("203.0.113.40/32") == route_set::DirectPath::kNotDirect);
+    VERIFY(table.setIps({"203.0.113.40/32"}));
+    VERIFY(table.createAttempts == 1 && table.hasRoute("203.0.113.40/32"));
+
+    // On-link on the Wi-Fi adapter (or another non-tunnel one): directly attached, no route.
+    FakeRoutingTable lan;
+    lan.onLink.push_back({"203.0.113.40/32", true});
+    VERIFY(lan.setIps({"203.0.113.40/32"}));
+    VERIFY(lan.createAttempts == 0 && lan.routes.empty());
+}
+
+void testUnreadableRoutingTableKeepsLoopbackLocal()
+{
+    // The IPv4 routing table cannot be read, with 127.0.0.1 and the VLESS IP excluded.
+    FakeRoutingTable table;
+    table.isTableRead = false;
+    table.onLink.clear();
+    // Loopback stays local: no route through the Wi-Fi gateway is even attempted.
+    VERIFY(table.setIps({"127.0.0.1/32"}));
+    VERIFY(table.createAttempts == 0 && table.routes.empty());
+    // The VLESS IP: no answer on whether it is directly attached, so no route over it and not in
+    // place (the engine resends, then ends a proxied attempt).
+    VERIFY(!table.setIps({"127.0.0.1/32", "203.0.113.40/32"}));
+    VERIFY(table.routes.empty());
+    VERIFY(table.directPath("203.0.113.40/32") == route_set::DirectPath::kUnknown);
+
+    // Once the table reads again, it is routed.
+    table.isTableRead = true;
+    VERIFY(table.setIps({"127.0.0.1/32", "203.0.113.40/32"}));
+    VERIFY(table.hasRoute("203.0.113.40/32") && !table.hasRoute("127.0.0.1/32"));
+}
+
 } // namespace
+
 
 
 
@@ -1527,6 +1579,8 @@ int main()
     testMissingGatewayIsNotAnExclusion();
     testConflictingRouteIsNotConfirmed();
     testFailedCleanupWhileDisabledIsRetried();
+    testOnLinkRouteOnTunnelDoesNotConfirmExclusion();
+    testUnreadableRoutingTableKeepsLoopbackLocal();
     if (g_failures == 0) {
         printf("All scoped permit tests passed.\n");
     }

@@ -200,7 +200,9 @@ Emergency Connect is unchanged and never uses the proxy.
   once before giving up.
   - A route counts as in place when Windscribe created it, when the same route (prefix, interface
     and gateway) already existed, or when none is needed: the local subnet or loopback, or an IPv6
-    address on a network without IPv6.
+    address on a network without IPv6. A destination that is directly attached only on the Windscribe
+    tunnel adapter does not count. If Windows cannot read its routing table, loopback stays local,
+    and other exclusions are not counted as in place (no route is guessed).
   - No IPv4 gateway, or another program's route for that address through a different gateway, does
     not count. The other program's route is left alone.
   - A route that cannot be deleted, such as an old VLESS IP's, stays tracked and is deleted again
