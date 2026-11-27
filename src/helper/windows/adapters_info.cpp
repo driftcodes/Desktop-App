@@ -10,12 +10,9 @@ AdaptersInfo::AdaptersInfo()
 {
     WS_DEBUG_TRACE_SCOPE("AdaptersInfo::AdaptersInfo");
     ULONG ulAdapterInfoSize = 4096;
-    adapterInfoBuffer_.reset(new unsigned char[ulAdapterInfoSize]);
-
-    DWORD result = ::GetAdaptersAddresses(AF_UNSPEC, NULL, NULL, (PIP_ADAPTER_ADDRESSES)adapterInfoBuffer_.get(), &ulAdapterInfoSize);
-
-    if (result == ERROR_BUFFER_OVERFLOW)
-    {
+    DWORD result = ERROR_BUFFER_OVERFLOW;
+    // The list can grow between the size query and the read: a few attempts.
+    for (int attempt = 0; attempt < 3 && result == ERROR_BUFFER_OVERFLOW; ++attempt) {
         adapterInfoBuffer_.reset(new unsigned char[ulAdapterInfoSize]);
         result = ::GetAdaptersAddresses(AF_UNSPEC, NULL, NULL, (PIP_ADAPTER_ADDRESSES)adapterInfoBuffer_.get(), &ulAdapterInfoSize);
     }
@@ -23,14 +20,18 @@ AdaptersInfo::AdaptersInfo()
     if (result == ERROR_SUCCESS)
     {
         pAdapterInfo_ = (PIP_ADAPTER_ADDRESSES)adapterInfoBuffer_.get();
+        isListed_ = true;
     }
     else
     {
         adapterInfoBuffer_.reset();
-        spdlog::error(L"AdaptersInfo - GetAdaptersAddresses failed {}", result);
+        // ERROR_NO_DATA: no adapters at all, a genuinely empty list.
+        isListed_ = result == ERROR_NO_DATA;
+        if (!isListed_) {
+            spdlog::error(L"AdaptersInfo - GetAdaptersAddresses failed {}", result);
+        }
     }
 }
-
 
 bool AdaptersInfo::isAppVpnAdapter(NET_IFINDEX index) const
 {

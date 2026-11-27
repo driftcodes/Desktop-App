@@ -35,6 +35,7 @@ ConnectErrorClassification classifyConnectError(ConnectError err, bool isAutomat
         // The connector's DNS leak filter could not be installed; another attempt or protocol would
         // run without it as well.
         case ConnectError::kDnsLeakProtectionFailed:
+        case ConnectError::kSplitTunnelingFailed:
             return ConnectErrorClassification::ErrorAfterDisconnect;
         case ConnectError::kVpnServiceSetupFailure:
         case ConnectError::kHostsFileNotWritable:

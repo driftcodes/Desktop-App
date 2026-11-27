@@ -339,6 +339,11 @@ bool FirewallFilter::addFilters(HANDLE engineHandle, const wchar_t *connectingIp
     bool isComplete = true;
     AdaptersInfo ai;
     std::vector<NET_IFINDEX> taps = ai.getTAPAdapters();
+    if (!ai.isListed()) {
+        // The tunnel adapter's permits may be missing: reported incomplete, so the client resends.
+        spdlog::error("FirewallFilter::addFilters(), the adapters could not be listed");
+        isComplete = false;
+    }
 
     // add block filter for all IPs, for all adapters, IPv4.
     bool ret = Utils::addFilterV4(engineHandle, nullptr, FWP_ACTION_BLOCK, 0, subLayerGUID_, FIREWALL_SUBLAYER_NAMEW);

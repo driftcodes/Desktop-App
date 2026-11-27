@@ -76,6 +76,8 @@ enum class ConnectError {
     kProxyRequiresTcp = 21,             // a proxy is configured but the attempt is not OpenVPN TCP; terminal
     kRouteSetupFailure = 22,            // OpenVPN connected but could not install its routes; terminal
     kDnsLeakProtectionFailed = 23,      // Windows, proxy set: the DNS leak filter could not be installed; terminal
+    kSplitTunnelingFailed = 24,         // Windows, proxy set, Exclusive split tunneling: the connected split
+                                        // tunneling settings were not applied; terminal, the settings kept
 };
 
 enum PROXY_SHARING_TYPE {

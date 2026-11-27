@@ -188,6 +188,11 @@ Emergency Connect is unchanged and never uses the proxy.
   step. If one of them cannot be deleted, nothing is removed, the DNS block stays, and the helper
   tries again. The firewall removal tool follows the same order. The separate IPv6 block works the
   same way: a change that cannot be completed is not applied, and is retried.
+- **If split tunneling cannot start.** For a session through the proxy with Exclusive split
+  tunneling, Throne and its core need their exclusion. If the helper cannot apply the connected split
+  tunneling settings, the app disconnects with an error you can retry. It no longer stays connected
+  and turns split tunneling off in Preferences: your settings and exclusions are kept for the next
+  attempt. Without a proxy, or in Inclusive mode, the official app's handling is unchanged.
 - **IPv6 while connected.** Windows blocks IPv6 outside the tunnel whenever you are connected, even
   with the firewall off. The app now waits for that block, as rebuilt for the final split tunneling
   settings, before it shows Connected. If the block cannot be installed (after one retry), it

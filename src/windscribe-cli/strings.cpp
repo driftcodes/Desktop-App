@@ -137,6 +137,8 @@ QString connectStateString(types::ConnectState state, LocationID location, TUNNE
             return QString("Error: The VPN connected but its routes could not be added");
         case ConnectError::kDnsLeakProtectionFailed:
             return QString("Error: leak protection (DNS or IPv6 firewall rules) could not be set up, so the VPN did not connect. Try again in a moment");
+        case ConnectError::kSplitTunnelingFailed:
+            return QString("Error: split tunneling could not be started, so the VPN disconnected (your proxy app relies on its exclusion). Your split tunneling settings are kept; try connecting again");
         default:
             if (!state.connectErrorDetail.isEmpty()) {
                 return QString("Error: %1").arg(static_cast<int>(state.connectError)) + QString(". ") + state.connectErrorDetail;

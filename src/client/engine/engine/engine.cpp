@@ -1647,8 +1647,25 @@ void Engine::onConnectionManagerConnected()
                                              connectionManager_->getDefaultAdapterInfo(), connectionManager_->getVpnAdapterInfo(),
                                              connectionManager_->getLastConnectedIp(), lastConnectingProtocol_,
                                              dnsConfigurator_->dnsWhitelistIps());
-    if (!result) {
+#ifdef Q_OS_WIN
+    const bool isProxiedSession = requestProxySettings().isProxyEnabled();
+#else
+    const bool isProxiedSession = false;  // upstream handling
+#endif
+    switch (firewall_policy::splitTunnelStartAction(result, isProxiedSession, isSplitTunnelActive_, isSplitTunnelExclude_)) {
+    case firewall_policy::SplitTunnelStartAction::kEndAttempt:
+        // Built-in and imported OpenVPN TCP profiles alike: not reported connected, and the split
+        // tunneling preference is not turned off (no splitTunnelingStartFailed), so the next attempt
+        // uses the exclusions again. The firewall stays as it is.
+        qCCritical(LOG_CONNECTION) << "Split tunneling could not be applied for the proxied session; disconnecting";
+        pendingDisconnectError_ = ConnectError::kSplitTunnelingFailed;
+        connectionManager_->clickDisconnect(DISCONNECTED_WITH_ERROR);
+        return;
+    case firewall_policy::SplitTunnelStartAction::kWarnAndDisable:
         emit splitTunnelingStartFailed();
+        break;
+    case firewall_policy::SplitTunnelStartAction::kContinue:
+        break;
     }
 
     // Wanted on is enough: a status query that fails just now must not skip the connected rules.
@@ -2682,6 +2699,8 @@ void Engine::setSettingsMacAddressSpoofingImpl(const types::MacAddrSpoofing &mac
 void Engine::setSplitTunnelingSettingsImpl(bool isActive, bool isExclude, const QStringList &files, const QStringList &ips, const QStringList &hosts)
 {
     WS_ASSERT(helper_ != NULL);
+    isSplitTunnelActive_ = isActive;
+    isSplitTunnelExclude_ = isExclude;
     helper_->setSplitTunnelingSettings(isActive, isExclude, engineSettings_.isAllowLanTraffic(), files, ips, hosts);
 
 #ifdef Q_OS_MACOS

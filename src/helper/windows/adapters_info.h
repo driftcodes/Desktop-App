@@ -13,6 +13,10 @@ class AdaptersInfo
 public:
     AdaptersInfo();
 
+    // false if the adapters could not be listed (an empty result is then not "no adapters"): rules
+    // built from it miss the adapters' permits and should be retried.
+    bool isListed() const { return isListed_; }
+
     bool isAppVpnAdapter(NET_IFINDEX index) const;
     bool getIkev2AdapterInfo(NET_IFINDEX &outIfIndex, std::wstring &outIp);
     std::vector<NET_IFINDEX> getTAPAdapters();
@@ -26,6 +30,7 @@ public:
 private:
     std::unique_ptr< unsigned char[] > adapterInfoBuffer_;
     PIP_ADAPTER_ADDRESSES pAdapterInfo_ = NULL;
+    bool isListed_ = false;
 
 private:
     bool isAppVpnAdapter(PIP_ADAPTER_ADDRESSES ai) const;

@@ -57,6 +57,23 @@ inline bool shouldApplyConnectedFirewall(bool isWanted, bool isActuallyOnQuery)
 // connected-state one (resendConnected() sends it). A complete connecting-state firewall is not.
 bool ensureConnectedFirewallReady(FirewallController &controller, const std::function<void()> &resendConnected);
 
+// The helper's answer to the connected-state split tunneling settings (sendConnectStatus). Upstream a
+// failure only warns, and the GUI turns split tunneling off. For a session with a proxy and Exclusive
+// split tunneling (Windows) the proxy app (Throne) and its core depend on their exclusion: the attempt
+// ends with an error instead, and the user's settings stay as they are, for the next attempt.
+enum class SplitTunnelStartAction { kContinue, kWarnAndDisable, kEndAttempt };
+inline SplitTunnelStartAction splitTunnelStartAction(bool isApplied, bool isProxiedSession, bool isSplitTunnelActive,
+                                                     bool isExclusive)
+{
+    if (isApplied) {
+        return SplitTunnelStartAction::kContinue;
+    }
+    if (isProxiedSession && isSplitTunnelActive && isExclusive) {
+        return SplitTunnelStartAction::kEndAttempt;
+    }
+    return SplitTunnelStartAction::kWarnAndDisable;
+}
+
 // A required protection step reported by the helper (Windows: the IPv6 block outside the tunnel, which
 // is installed when connected whatever the firewall setting): retried once if it was not applied, and
 // the result decides whether connected may be reported. The helper keeps retrying in the background.

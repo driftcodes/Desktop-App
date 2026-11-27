@@ -538,6 +538,7 @@ void TestConnectionManager::testClassifyConnectErrorMatrix()
     QCOMPARE(classifyConnectError(ConnectError::kRouteSetupFailure, true, false, false), C::ErrorAfterDisconnect);
     QCOMPARE(classifyConnectError(ConnectError::kRouteSetupFailure, false, false, true), C::ErrorAfterDisconnect);
     QCOMPARE(classifyConnectError(ConnectError::kDnsLeakProtectionFailed, true, false, true), C::ErrorAfterDisconnect);
+    QCOMPARE(classifyConnectError(ConnectError::kSplitTunnelingFailed, true, false, true), C::ErrorAfterDisconnect);
     QCOMPARE(classifyPrepareError(ConnectError::kProxyUnreachable, true), PrepareErrorRouting::HardStop);
 }
 

@@ -3665,6 +3665,9 @@ void MainWindow::handleDisconnectWithError(const types::ConnectState &connectSta
     } else if (connectState.connectError == ConnectError::kRouteSetupFailure) {
         msg = tr("The VPN connected, but its routes could not be added, so Windscribe disconnected. If you use a proxy on this computer,"
                  " make sure your Advanced Parameters do not add redirect-gateway or conflicting route lines.");
+    } else if (connectState.connectError == ConnectError::kSplitTunnelingFailed) {
+        msg = tr("Split tunneling could not be started, so Windscribe disconnected: your proxy app (such as Throne) relies on its"
+                 " exclusion to reach its server. Your split tunneling settings are kept; try connecting again.");
     } else if (connectState.connectError == ConnectError::kDnsLeakProtectionFailed) {
         msg = tr("Windscribe could not set up its leak protection (its DNS or IPv6 firewall rules), so it did not connect. Windscribe keeps trying in the background;"
                  " try connecting again in a moment. If this keeps happening, restart the computer or reinstall Windscribe.");

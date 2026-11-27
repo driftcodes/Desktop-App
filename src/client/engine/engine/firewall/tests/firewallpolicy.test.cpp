@@ -1278,4 +1278,56 @@ void TestFirewallPolicy::testIpv6BlockGatesConnected()
     QCOMPARE(retries, 2);
 }
 
+void TestFirewallPolicy::testProxiedSplitTunnelFailureEndsAttemptKeepsSettings()
+{
+    using firewall_policy::SplitTunnelStartAction;
+    // The user's saved split tunneling settings: Exclusive, Throne and its core excluded.
+    struct Saved {
+        bool isActive = true;
+        bool isExclusive = true;
+        QStringList apps = {"throne.exe", "sing-box.exe"};
+    } saved;
+    struct Outcome {
+        bool isConnected = false;
+        bool isError = false;
+    };
+    // Engine::onConnectionManagerConnected for a proxied session (built-in or imported OpenVPN TCP
+    // profile alike), with the GUI's reaction to splitTunnelingStartFailed (it turns the preference off).
+    QStringList appliedApps;
+    const auto attempt = [&](bool isHelperApplied) {
+        Outcome outcome;
+        switch (firewall_policy::splitTunnelStartAction(isHelperApplied, true, saved.isActive, saved.isExclusive)) {
+        case SplitTunnelStartAction::kEndAttempt:
+            outcome.isError = true;
+            return outcome;
+        case SplitTunnelStartAction::kWarnAndDisable:
+            saved.isActive = false;
+            break;
+        case SplitTunnelStartAction::kContinue:
+            appliedApps = saved.apps;
+            break;
+        }
+        outcome.isConnected = true;
+        return outcome;
+    };
+
+    // The helper reports failure: not connected, an error, the settings untouched.
+    const Outcome failed = attempt(false);
+    QVERIFY(!failed.isConnected && failed.isError);
+    QVERIFY(saved.isActive && saved.isExclusive);
+    QCOMPARE(saved.apps, QStringList({"throne.exe", "sing-box.exe"}));
+
+    // The next attempt succeeds, with the exclusions.
+    const Outcome next = attempt(true);
+    QVERIFY(next.isConnected && !next.isError);
+    QCOMPARE(appliedApps, QStringList({"throne.exe", "sing-box.exe"}));
+
+    // Upstream handling elsewhere: without a proxy, or in Inclusive mode, a failure warns (the GUI then
+    // turns split tunneling off) and the connection goes on.
+    QVERIFY(firewall_policy::splitTunnelStartAction(false, false, true, true) == SplitTunnelStartAction::kWarnAndDisable);
+    QVERIFY(firewall_policy::splitTunnelStartAction(false, true, true, false) == SplitTunnelStartAction::kWarnAndDisable);
+    QVERIFY(firewall_policy::splitTunnelStartAction(false, true, false, true) == SplitTunnelStartAction::kWarnAndDisable);
+    QVERIFY(firewall_policy::splitTunnelStartAction(true, true, true, true) == SplitTunnelStartAction::kContinue);
+}
+
 QTEST_MAIN(TestFirewallPolicy)

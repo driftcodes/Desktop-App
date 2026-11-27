@@ -281,6 +281,11 @@ bool Ipv6Firewall::addFilters(HANDLE engineHandle, bool allowLanTraffic, bool is
     bool areBlocksAdded = true;
     AdaptersInfo ai;
     std::vector<NET_IFINDEX> taps = ai.getTAPAdapters();
+    if (!ai.isListed()) {
+        // The tunnel adapter's permit may be missing: the blocks go in, the rebuild is retried.
+        spdlog::error("Ipv6Firewall::addFilters(), the adapters could not be listed; retrying");
+        arePermitsComplete = false;
+    }
 
     // add block filter for all IPv6
     bool ret = Utils::addFilterV6(engineHandle, nullptr, FWP_ACTION_BLOCK, 0, subLayerGUID_, FIREWALL_SUBLAYER_IPV6_NAMEW);
