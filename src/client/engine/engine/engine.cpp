@@ -1660,6 +1660,8 @@ void Engine::onConnectionManagerConnected()
         requested.isActive = isSplitTunnelActive_;
         requested.isExclusive = isSplitTunnelExclude_;
         requested.apps = splitTunnelFiles_;
+        requested.ips = splitTunnelIps_;
+        requested.hosts = splitTunnelHosts_;
         result = firewall_policy::ensureSplitTunnelConfirmed(
             result, requested, [this]() { return helper_->lastAppliedSplitTunnel(); },
             [this, &sendConnectedStatus]() {

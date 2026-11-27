@@ -4,7 +4,7 @@
 #include <ws2def.h>
 
 #include "helper_base.h"
-#include "firewall/firewallpolicy.h"
+#include "../firewall/firewallpolicy.h"
 #include "types/protocol.h"
 
 class AdapterGatewayInfo;

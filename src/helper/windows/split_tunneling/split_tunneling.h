@@ -29,8 +29,18 @@ public:
         bool isExclude;
         std::vector<std::wstring> apps;
         bool areAppsResolved;
+        std::vector<std::wstring> ips;    // as received (e.g. the VLESS server's address)
+        std::vector<std::wstring> hosts;  // as received
     };
-    Confirmation confirmation() const { return {isSplitTunnelEnabled_, isExclude_, apps_, unresolvedApps_.empty()}; }
+    Confirmation confirmation() const
+    {
+        return {isSplitTunnelEnabled_, isExclude_, apps_, unresolvedApps_.empty(), receivedIps_, receivedHosts_};
+    }
+    void setReceivedLists(const std::vector<std::wstring> &ips, const std::vector<std::wstring> &hosts)
+    {
+        receivedIps_ = ips;
+        receivedHosts_ = hosts;
+    }
 
     static void removeAllFilters(FwpmWrapper& fwmpWrapper);
 
@@ -54,6 +64,8 @@ private:
     bool isAllowLanTraffic_ = false;
     std::vector<std::wstring> apps_;
     std::vector<std::wstring> unresolvedApps_;
+    std::vector<std::wstring> receivedIps_;
+    std::vector<std::wstring> receivedHosts_;
     bool prevIsSplitTunnelActive_ = false;
     bool prevIsExclude_ = false;
     // LUID of the VPN adapter of the last connected state. Kept after disconnect: a "default

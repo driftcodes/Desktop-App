@@ -80,6 +80,9 @@ std::string setSplitTunnelingSettings(const std::string &pars)
     bool isActive, isExclude, isAllowLanTraffic;
     std::vector<std::wstring> files, ips, hosts_wstr;
     deserializePars(pars, isActive, isExclude, isAllowLanTraffic, files, ips, hosts_wstr);
+    // The lists as received, for the confirmation (sendConnectStatus): they identify the request; a
+    // malformed entry dropped below is no exclusion to apply.
+    SplitTunneling::instance().setReceivedLists(ips, hosts_wstr);
 
     // Rather than reject the whole request on bad input, sanitize it: drop any invalid IP/CIDR
     // and hostname entries and apply the valid remainder. This keeps split tunneling functional
@@ -150,7 +153,8 @@ std::string sendConnectStatus(const std::string &pars)
     g_SplitTunnelingPars.isVpnConnected = connectStatus.isConnected;
     // Followed by the split tunneling settings this helper applied (see SplitTunneling::Confirmation).
     const SplitTunneling::Confirmation applied = SplitTunneling::instance().confirmation();
-    return serializeResult(success, applied.isEnabled, applied.isExclude, applied.apps, applied.areAppsResolved);
+    return serializeResult(success, applied.isEnabled, applied.isExclude, applied.apps, applied.areAppsResolved, applied.ips,
+                           applied.hosts);
 }
 
 std::string changeMtu(const std::string &pars)

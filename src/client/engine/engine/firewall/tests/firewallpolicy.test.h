@@ -41,4 +41,5 @@ private slots:
     void testProxiedSplitTunnelFailureEndsAttemptKeepsSettings();
     void testRestartedHelperSplitTunnelIsReapplied();
     void testUnresolvedExcludedAppIsNotConfirmed();
+    void testChangedVlessIpIsConfirmed();
 };

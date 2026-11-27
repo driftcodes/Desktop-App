@@ -1337,10 +1337,15 @@ struct FakeSplitTunnelHelper {
     firewall_policy::SplitTunnelState settings;  // what it applies (a fresh one: off, no apps)
     QStringList unidentifiable;                  // programs it cannot identify (they exist)
     int settingsSent = 0;
+    int dropNextSettings = 0;                    // settings lost on the way (the previous ones stay)
     void restart() { settings = firewall_policy::SplitTunnelState(); }
     void setSettings(const firewall_policy::SplitTunnelState &s)
     {
         ++settingsSent;
+        if (dropNextSettings > 0) {
+            --dropNextSettings;
+            return;
+        }
         settings = s;
     }
     bool sendConnectStatus() { return true; }  // the status itself applies
@@ -1373,6 +1378,7 @@ firewall_policy::SplitTunnelState throneExclusions()
     s.isActive = true;
     s.isExclusive = true;
     s.apps = {"C:/Throne/throne.exe", "C:/Throne/sing-box.exe"};
+    s.ips = {"198.51.100.20/32"};  // the VLESS server
     return s;
 }
 
@@ -1430,6 +1436,35 @@ void TestFirewallPolicy::testUnresolvedExcludedAppIsNotConfirmed()
     helper.unidentifiable.clear();
     QVERIFY(connectedAttempt(helper, requested));
     QCOMPARE(helper.excludedWithRules(), requested.apps);
+}
+
+void TestFirewallPolicy::testChangedVlessIpIsConfirmed()
+{
+    // The VLESS server moves; only its IP exclusion changes, the executables stay the same.
+    FakeSplitTunnelHelper helper;
+    helper.setSettings(throneExclusions());
+    firewall_policy::SplitTunnelState requested = throneExclusions();
+    requested.ips = {"203.0.113.40/32"};
+
+    // The helper still has the previous list: the first stale report makes the engine send the
+    // settings again, and it then reports the new address.
+    helper.dropNextSettings = 1;
+    helper.setSettings(requested);
+    QVERIFY(!firewall_policy::isSplitTunnelConfirmed(requested, helper.report()));
+    QVERIFY(connectedAttempt(helper, requested));
+    QCOMPARE(helper.report().ips, QStringList({"203.0.113.40/32"}));
+
+    // Stale again after the resend: the attempt ends.
+    requested.ips = {"203.0.113.41/32"};
+    helper.dropNextSettings = 2;
+    helper.setSettings(requested);
+    QVERIFY(!connectedAttempt(helper, requested));
+    QCOMPARE(helper.report().ips, QStringList({"203.0.113.40/32"}));
+
+    // The same for a hostname exclusion.
+    firewall_policy::SplitTunnelState withHost = throneExclusions();
+    withHost.hosts = {"vless.example.net"};
+    QVERIFY(!firewall_policy::isSplitTunnelConfirmed(withHost, throneExclusions()));
 }
 
 QTEST_MAIN(TestFirewallPolicy)
