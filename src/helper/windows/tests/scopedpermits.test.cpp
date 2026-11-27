@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "scoped_permit_plan.h"
+#include "split_tunneling/hostnames_manager/route_set.h"
 
 namespace
 {
@@ -1295,7 +1296,96 @@ void testIpv6MissingPermitRetriedWithBlockKept()
     VERIFY(!update.sync.isPending());
 }
 
+// IpRoutes with Windows' routing table reduced to a set of (destination, gateway) routes.
+struct FakeRoutingTable {
+    std::set<std::pair<std::string, std::string>> routes;
+    std::set<std::string> onLink = {"127.0.0.0/8", "192.168.31.0/24"};
+    std::set<std::string> failCreate;
+    std::set<std::string> failDelete;
+    std::string gateway = "192.168.31.1";
+    route_set::RouteSet<std::string, std::pair<std::string, std::string>> set;
+
+    bool setIps(const std::set<std::string> &ips)
+    {
+        return set.apply(
+            ips, [&](const std::string &ip) { return onLink.count(ip) != 0; },
+            [&](const std::string &ip, std::pair<std::string, std::string> &row) {
+                row = {ip, gateway};
+                if (failCreate.count(ip) != 0) {
+                    return route_set::CreateResult::kFailed;
+                }
+                return routes.insert(row).second ? route_set::CreateResult::kCreated : route_set::CreateResult::kAlreadyThere;
+            },
+            [&](const std::pair<std::string, std::string> &row) { return remove(row); });
+    }
+    route_set::DeleteResult remove(const std::pair<std::string, std::string> &row)
+    {
+        if (failDelete.count(row.first) != 0) {
+            return route_set::DeleteResult::kFailed;
+        }
+        return routes.erase(row) == 1 ? route_set::DeleteResult::kDeleted : route_set::DeleteResult::kNotFound;
+    }
+    bool clear()
+    {
+        return set.clear([&](const std::pair<std::string, std::string> &row) { return remove(row); });
+    }
+    bool hasRoute(const std::string &ip) const { return routes.count({ip, gateway}) != 0; }
+};
+
+void testVlessRouteCreationFailureIsReported()
+{
+    // A valid new VLESS IP whose route Windows refuses: not applied (the engine resends, then ends
+    // the attempt with the retryable error).
+    FakeRoutingTable table;
+    table.failCreate = {"203.0.113.40/32"};
+    VERIFY(!table.setIps({"203.0.113.40/32"}));
+    VERIFY(!table.hasRoute("203.0.113.40/32"));
+    VERIFY(!table.set.isApplied({"203.0.113.40/32"}));
+
+    // The resend, once Windows accepts it.
+    table.failCreate.clear();
+    VERIFY(table.setIps({"203.0.113.40/32"}));
+    VERIFY(table.hasRoute("203.0.113.40/32"));
+
+    // Directly attached destinations (loopback, the Wi-Fi subnet) need no route: in place.
+    VERIFY(table.setIps({"203.0.113.40/32", "127.0.0.0/8", "192.168.31.0/24"}));
+    VERIFY(table.routes.size() == 1);
+
+    // An identical route that is already there (not ours) is the intended path, and is not removed
+    // when the list changes.
+    FakeRoutingTable existing;
+    existing.routes.insert({"198.51.100.20/32", existing.gateway});
+    VERIFY(existing.setIps({"198.51.100.20/32"}));
+    VERIFY(existing.setIps({}));
+    VERIFY(existing.hasRoute("198.51.100.20/32"));
+}
+
+void testOldVlessRouteDeletionIsRetried()
+{
+    // The VLESS server moves: the old IP's route cannot be deleted.
+    FakeRoutingTable table;
+    VERIFY(table.setIps({"198.51.100.20/32"}));
+    table.failDelete = {"198.51.100.20/32"};
+    VERIFY(!table.setIps({"203.0.113.40/32"}));  // the new one is in, the old one is left: not applied
+    VERIFY(table.hasRoute("198.51.100.20/32") && table.hasRoute("203.0.113.40/32"));
+    VERIFY(table.set.staleCount() == 1);
+
+    // Still tracked: the next update deletes it.
+    table.failDelete.clear();
+    VERIFY(table.setIps({"203.0.113.40/32"}));
+    VERIFY(!table.hasRoute("198.51.100.20/32") && table.set.staleCount() == 0);
+
+    // The same for a clear (disconnect) that cannot delete a route.
+    table.failDelete = {"203.0.113.40/32"};
+    VERIFY(!table.clear());
+    VERIFY(table.hasRoute("203.0.113.40/32"));
+    table.failDelete.clear();
+    VERIFY(table.clear());
+    VERIFY(table.routes.empty());
+}
+
 } // namespace
+
 
 
 
@@ -1335,6 +1425,8 @@ int main()
     testIpv6PendingUnblockSurvivesSettingsRefresh();
     testIpv6MissingPermitRetriedWithBlockKept();
     testIpv6FinalCheckConfirmsRebuiltBlock();
+    testVlessRouteCreationFailureIsReported();
+    testOldVlessRouteDeletionIsRetried();
     if (g_failures == 0) {
         printf("All scoped permit tests passed.\n");
     }

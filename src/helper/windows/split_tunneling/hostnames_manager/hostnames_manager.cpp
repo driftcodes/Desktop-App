@@ -62,6 +62,12 @@ void HostnamesManager::disable()
     spdlog::debug("HostnamesManager::disable(), end");
 }
 
+bool HostnamesManager::areManualRoutesApplied()
+{
+    std::lock_guard<std::recursive_mutex> guard(mutex_);
+    return !isEnabled_ || ipRoutes_.areApplied(ipsLatest_);
+}
+
 void HostnamesManager::setSettings(bool isExclude,
                                    const std::vector<types::IpAddressRange> &ips,
                                    const std::vector<std::string> &hosts)

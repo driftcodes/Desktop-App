@@ -86,7 +86,8 @@ bool Helper_win::sendConnectStatus(bool isConnected, bool isTerminateSocket, boo
     bool areAppsResolved = false;  // no report: not confirmed
     std::vector<std::wstring> ips;
     std::vector<std::wstring> hosts;
-    deserializeAnswer(result, success, isEnabled, isExclude, apps, areAppsResolved, ips, hosts);
+    bool areRoutesApplied = false;
+    deserializeAnswer(result, success, isEnabled, isExclude, apps, areAppsResolved, ips, hosts, areRoutesApplied);
     lastAppliedSplitTunnel_ = firewall_policy::SplitTunnelState();
     lastAppliedSplitTunnel_.isActive = isEnabled;
     lastAppliedSplitTunnel_.isExclusive = isExclude;
@@ -94,6 +95,7 @@ bool Helper_win::sendConnectStatus(bool isConnected, bool isTerminateSocket, boo
         lastAppliedSplitTunnel_.apps << QString::fromStdWString(app);
     }
     lastAppliedSplitTunnel_.areAppsResolved = areAppsResolved;
+    lastAppliedSplitTunnel_.areRoutesApplied = areRoutesApplied;
     for (const auto &ip : ips) {
         lastAppliedSplitTunnel_.ips << QString::fromStdWString(ip);
     }

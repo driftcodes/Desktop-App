@@ -1336,6 +1336,7 @@ namespace {
 struct FakeSplitTunnelHelper {
     firewall_policy::SplitTunnelState settings;  // what it applies (a fresh one: off, no apps)
     QStringList unidentifiable;                  // programs it cannot identify (they exist)
+    int failNextRoutes = 0;                      // attempts whose IP routes cannot be created
     int settingsSent = 0;
     int dropNextSettings = 0;                    // settings lost on the way (the previous ones stay)
     void restart() { settings = firewall_policy::SplitTunnelState(); }
@@ -1348,10 +1349,19 @@ struct FakeSplitTunnelHelper {
         }
         settings = s;
     }
-    bool sendConnectStatus() { return true; }  // the status itself applies
+    bool areRoutesIn = true;
+    bool sendConnectStatus()  // the status itself applies (and the routes are made)
+    {
+        areRoutesIn = failNextRoutes == 0;
+        if (failNextRoutes > 0) {
+            --failNextRoutes;
+        }
+        return true;
+    }
     firewall_policy::SplitTunnelState report() const
     {
         firewall_policy::SplitTunnelState r = settings;
+        r.areRoutesApplied = areRoutesIn;
         for (const QString &app : settings.apps) {
             if (unidentifiable.contains(app)) {
                 r.areAppsResolved = false;
@@ -1465,6 +1475,22 @@ void TestFirewallPolicy::testChangedVlessIpIsConfirmed()
     firewall_policy::SplitTunnelState withHost = throneExclusions();
     withHost.hosts = {"vless.example.net"};
     QVERIFY(!firewall_policy::isSplitTunnelConfirmed(withHost, throneExclusions()));
+}
+
+void TestFirewallPolicy::testMissingVlessRouteIsNotConfirmed()
+{
+    // The VLESS IP is in the helper's settings, but Windows refused its route: resent once.
+    const firewall_policy::SplitTunnelState requested = throneExclusions();
+    FakeSplitTunnelHelper helper;
+    helper.setSettings(requested);
+    helper.failNextRoutes = 1;
+    QVERIFY(connectedAttempt(helper, requested));
+    QCOMPARE(helper.settingsSent, 2);
+
+    // Refused again after the resend: the attempt ends (retryable), the settings kept.
+    helper.failNextRoutes = 2;
+    QVERIFY(!connectedAttempt(helper, requested));
+    QCOMPARE(helper.settings.ips, requested.ips);
 }
 
 QTEST_MAIN(TestFirewallPolicy)

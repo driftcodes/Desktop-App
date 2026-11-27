@@ -42,4 +42,5 @@ private slots:
     void testRestartedHelperSplitTunnelIsReapplied();
     void testUnresolvedExcludedAppIsNotConfirmed();
     void testChangedVlessIpIsConfirmed();
+    void testMissingVlessRouteIsNotConfirmed();
 };

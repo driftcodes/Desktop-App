@@ -154,7 +154,7 @@ std::string sendConnectStatus(const std::string &pars)
     // Followed by the split tunneling settings this helper applied (see SplitTunneling::Confirmation).
     const SplitTunneling::Confirmation applied = SplitTunneling::instance().confirmation();
     return serializeResult(success, applied.isEnabled, applied.isExclude, applied.apps, applied.areAppsResolved, applied.ips,
-                           applied.hosts);
+                           applied.hosts, applied.areRoutesApplied);
 }
 
 std::string changeMtu(const std::string &pars)

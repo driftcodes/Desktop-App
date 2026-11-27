@@ -31,10 +31,15 @@ public:
         bool areAppsResolved;
         std::vector<std::wstring> ips;    // as received (e.g. the VLESS server's address)
         std::vector<std::wstring> hosts;  // as received
+        // The routes for the valid IP exclusions are in place (a destination that needs none, such as
+        // a directly attached one, counts), and none that should be gone is left. Hostnames resolve
+        // asynchronously and are not waited for.
+        bool areRoutesApplied;
     };
-    Confirmation confirmation() const
+    Confirmation confirmation()
     {
-        return {isSplitTunnelEnabled_, isExclude_, apps_, unresolvedApps_.empty(), receivedIps_, receivedHosts_};
+        return {isSplitTunnelEnabled_, isExclude_, apps_, unresolvedApps_.empty(), receivedIps_, receivedHosts_,
+                hostnamesManager_.areManualRoutesApplied()};
     }
     void setReceivedLists(const std::vector<std::wstring> &ips, const std::vector<std::wstring> &hosts)
     {

@@ -69,6 +69,7 @@ struct SplitTunnelState
     bool areAppsResolved = true;
     QStringList ips;    // as sent, e.g. the VLESS server's address
     QStringList hosts;  // as sent
+    bool areRoutesApplied = true;  // the routes for those IPs are in place (hostnames not waited for)
 };
 
 // Whether the helper applies what was asked for. A helper that restarted runs on its defaults (split
@@ -77,7 +78,7 @@ inline bool isSplitTunnelConfirmed(const SplitTunnelState &requested, const Spli
 {
     return applied.isActive == requested.isActive && applied.isExclusive == requested.isExclusive &&
            applied.apps == requested.apps && applied.areAppsResolved && applied.ips == requested.ips &&
-           applied.hosts == requested.hosts;
+           applied.hosts == requested.hosts && applied.areRoutesApplied;
 }
 
 // The connected status for a session that depends on its exclusions (proxied, Exclusive): applied

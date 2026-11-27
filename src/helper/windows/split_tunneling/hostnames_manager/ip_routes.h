@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "types/ipaddress.h"
+#include "route_set.h"
 
 // Manages a set of system routes for split-tunneling host pinning.
 // Dual-stack (IPv4 + IPv6) — uses the modern netioapi.h API (MIB_IPFORWARD_ROW2 /
@@ -25,14 +26,19 @@ public:
     // interface is left to its own on-link route instead of being pinned to the gateway — see
     // collectOnLinkPrefixes(). Inclusive mode always installs the route, since the point there
     // is to pull the destination into the tunnel.
-    void setIps(const types::IpAddress &gatewayIp,
+    // false if a route could not be created, or one that should go could not be deleted (it stays
+    // tracked and is deleted again on the next call).
+    bool setIps(const types::IpAddress &gatewayIp,
                 const types::IpAddress &gatewayIpV6,
                 unsigned long ifIndex,
                 const std::vector<types::IpAddressRange> &ips,
                 bool isExclude);
-    void clear();
+    bool clear();
+    // Whether these destinations are in place (see route_set::RouteSet::isApplied).
+    bool areApplied(const std::vector<types::IpAddressRange> &ips);
 
 private:
     std::recursive_mutex mutex_;
-    std::map<types::IpAddressRange, MIB_IPFORWARD_ROW2> activeRoutes_;
+    route_set::RouteSet<types::IpAddressRange, MIB_IPFORWARD_ROW2> routes_;
+    static route_set::DeleteResult removeRoute(const MIB_IPFORWARD_ROW2 &row);
 };
