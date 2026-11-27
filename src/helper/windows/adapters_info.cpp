@@ -33,6 +33,16 @@ AdaptersInfo::AdaptersInfo()
     }
 }
 
+bool AdaptersInfo::contains(NET_IFINDEX index) const
+{
+    for (PIP_ADAPTER_ADDRESSES ai = pAdapterInfo_; ai; ai = ai->Next) {
+        if (ai->IfIndex == index) {  // as isAppVpnAdapter() matches it
+            return true;
+        }
+    }
+    return false;
+}
+
 bool AdaptersInfo::isAppVpnAdapter(NET_IFINDEX index) const
 {
     PIP_ADAPTER_ADDRESSES ai = pAdapterInfo_;

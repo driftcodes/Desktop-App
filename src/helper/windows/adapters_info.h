@@ -18,6 +18,8 @@ public:
     bool isListed() const { return isListed_; }
 
     bool isAppVpnAdapter(NET_IFINDEX index) const;
+    // Whether the snapshot has this adapter (one that appeared since it was taken is missing).
+    bool contains(NET_IFINDEX index) const;
     bool getIkev2AdapterInfo(NET_IFINDEX &outIfIndex, std::wstring &outIp);
     std::vector<NET_IFINDEX> getTAPAdapters();
     std::vector<std::string> getAdapterAddresses(NET_IFINDEX idx);

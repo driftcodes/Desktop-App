@@ -1301,8 +1301,9 @@ void testIpv6MissingPermitRetriedWithBlockKept()
 // destination prefix (one interface here), each with its next hop.
 struct FakeRoutingTable {
     std::map<std::string, std::string> routes;  // prefix -> next hop
-    // On-link routes (isUsable false: on the Windscribe tunnel adapter), and whether the table reads.
-    std::vector<route_set::OnLinkRoute<std::string>> onLink = {{"127.0.0.0/8", true}, {"192.168.31.0/24", true}};
+    // On-link routes as classified at the adapter lookup, and whether the table reads.
+    std::vector<route_set::OnLinkRoute<std::string>> onLink = {{"127.0.0.0/8", route_set::OnLinkUse::kUsable},
+                                                              {"192.168.31.0/24", route_set::OnLinkUse::kUsable}};
     bool isTableRead = true;
     int createAttempts = 0;
     std::set<std::string> failCreate;
@@ -1498,14 +1499,14 @@ void testOnLinkRouteOnTunnelDoesNotConfirmExclusion()
     // The VLESS server's exact /32 is on-link only on the Windscribe tunnel adapter: that is not the
     // exclusion's path; its Wi-Fi route is created.
     FakeRoutingTable table;
-    table.onLink.push_back({"203.0.113.40/32", false});
+    table.onLink.push_back({"203.0.113.40/32", route_set::OnLinkUse::kTunnel});
     VERIFY(table.directPath("203.0.113.40/32") == route_set::DirectPath::kNotDirect);
     VERIFY(table.setIps({"203.0.113.40/32"}));
     VERIFY(table.createAttempts == 1 && table.hasRoute("203.0.113.40/32"));
 
     // On-link on the Wi-Fi adapter (or another non-tunnel one): directly attached, no route.
     FakeRoutingTable lan;
-    lan.onLink.push_back({"203.0.113.40/32", true});
+    lan.onLink.push_back({"203.0.113.40/32", route_set::OnLinkUse::kUsable});
     VERIFY(lan.setIps({"203.0.113.40/32"}));
     VERIFY(lan.createAttempts == 0 && lan.routes.empty());
 }
@@ -1531,7 +1532,90 @@ void testUnreadableRoutingTableKeepsLoopbackLocal()
     VERIFY(table.hasRoute("203.0.113.40/32") && !table.hasRoute("127.0.0.1/32"));
 }
 
+// collectOnLinkRoutes' per-route lookup: interface state, intended adapter, adapter snapshot.
+struct FakeAdapterSnapshot {
+    bool isListed = true;
+    std::map<unsigned long, bool> adapters;           // ifIndex -> is the Windscribe tunnel
+    std::map<unsigned long, route_set::InterfaceState> states;
+    unsigned long intended = 7;                       // the Wi-Fi adapter
+
+    route_set::OnLinkUse classify(unsigned long ifIndex) const
+    {
+        const auto state = states.count(ifIndex) ? states.at(ifIndex) : route_set::InterfaceState::kConnected;
+        const bool isIn = adapters.count(ifIndex) != 0;
+        return route_set::classifyOnLinkRoute(state, ifIndex == intended, isListed, isIn, isIn && adapters.at(ifIndex));
+    }
+};
+
+void testUnclassifiedAdapterLeavesExclusionUnconfirmed()
+{
+    FakeAdapterSnapshot snapshot;
+    snapshot.adapters = {{7, false}, {12, true}};
+
+    // The VLESS /32 on an adapter (14) that appeared after the snapshot: not known not to be the
+    // tunnel, so no answer; the exclusion is left unconfirmed, no route made over it.
+    FakeRoutingTable table;
+    table.onLink.push_back({"203.0.113.40/32", snapshot.classify(14)});
+    VERIFY(table.onLink.back().use == route_set::OnLinkUse::kUnknown);
+    VERIFY(!table.setIps({"203.0.113.40/32"}));
+    VERIFY(table.routes.empty());
+
+    // ... unless another route establishes the path (on the Wi-Fi adapter itself).
+    table.onLink.push_back({"203.0.113.40/32", snapshot.classify(7)});
+    VERIFY(table.setIps({"203.0.113.40/32"}));
+
+    // On the known tunnel adapter: not the path; the Wi-Fi route is made.
+    FakeRoutingTable tunnel;
+    tunnel.onLink.push_back({"203.0.113.40/32", snapshot.classify(12)});
+    VERIFY(tunnel.onLink.back().use == route_set::OnLinkUse::kTunnel);
+    VERIFY(tunnel.setIps({"203.0.113.40/32"}) && tunnel.hasRoute("203.0.113.40/32"));
+
+    // The adapters could not be listed: only the intended adapter is classified.
+    snapshot.isListed = false;
+    VERIFY(snapshot.classify(12) == route_set::OnLinkUse::kUnknown);
+    VERIFY(snapshot.classify(7) == route_set::OnLinkUse::kUsable);
+}
+
+void testUnreadableInterfaceStateLeavesSubnetUnrouted()
+{
+    // A directly attached LAN subnet whose interface state cannot be read: not dropped as though
+    // absent (which led to routing the subnet through the gateway), but no answer.
+    FakeAdapterSnapshot snapshot;
+    snapshot.adapters = {{7, false}, {9, false}};
+    snapshot.states[9] = route_set::InterfaceState::kUnknown;
+    FakeRoutingTable table;
+    table.onLink = {{"10.10.0.0/16", snapshot.classify(9)}};
+    VERIFY(!table.setIps({"10.10.0.0/16"}));
+    VERIFY(table.routes.empty() && table.createAttempts == 1);
+
+    // Once its state reads (connected): directly attached, no route.
+    snapshot.states[9] = route_set::InterfaceState::kConnected;
+    table.onLink = {{"10.10.0.0/16", snapshot.classify(9)}};
+    VERIFY(table.setIps({"10.10.0.0/16"}) && table.routes.empty());
+
+    // A disconnected (or vanished) adapter's routes do not apply.
+    snapshot.states[9] = route_set::InterfaceState::kDisconnected;
+    VERIFY(snapshot.classify(9) == route_set::OnLinkUse::kSkip);
+}
+
+void testLoopbackRangeNeedsLoopbackPrefix()
+{
+    const unsigned char v4[4] = {127, 0, 0, 1};
+    VERIFY(route_set::isLoopbackRange(true, v4, 32));
+    VERIFY(route_set::isLoopbackRange(true, v4, 8));
+    VERIFY(!route_set::isLoopbackRange(true, v4, 7));  // also 126.0.0.0/8
+    const unsigned char other[4] = {128, 0, 0, 1};
+    VERIFY(!route_set::isLoopbackRange(true, other, 32));
+    unsigned char v6[16] = {};
+    v6[15] = 1;
+    VERIFY(route_set::isLoopbackRange(false, v6, 128));
+    VERIFY(!route_set::isLoopbackRange(false, v6, 64));  // ::/64 covers more than ::1
+    v6[0] = 0x20;
+    VERIFY(!route_set::isLoopbackRange(false, v6, 128));
+}
+
 } // namespace
+
 
 
 
@@ -1581,6 +1665,9 @@ int main()
     testFailedCleanupWhileDisabledIsRetried();
     testOnLinkRouteOnTunnelDoesNotConfirmExclusion();
     testUnreadableRoutingTableKeepsLoopbackLocal();
+    testUnclassifiedAdapterLeavesExclusionUnconfirmed();
+    testUnreadableInterfaceStateLeavesSubnetUnrouted();
+    testLoopbackRangeNeedsLoopbackPrefix();
     if (g_failures == 0) {
         printf("All scoped permit tests passed.\n");
     }

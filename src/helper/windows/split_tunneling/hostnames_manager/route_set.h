@@ -35,15 +35,47 @@ inline bool shouldClearOnDisable(bool isEnabled, bool hasLeftovers)
 // Whether a destination is reached directly (an on-link route, no gateway), from the routing table's
 // on-link routes. Only a route on an adapter that may carry it counts: the intended (physical)
 // adapter or another non-tunnel one, not the Windscribe tunnel, whose own on-link routes must not
-// stand in for an exclusion's path outside the tunnel. A table that could not be read gives no
-// answer (kUnknown: no route is created over what may be a directly attached subnet, and the
-// exclusion is not in place) except for loopback, which stays local whatever the table says.
+// stand in for an exclusion's path outside the tunnel. What cannot be established gives no answer
+// (kUnknown: no route is created over what may be a directly attached subnet, and the exclusion is
+// not in place, retried with the next update): a table that could not be read, or a matching route
+// whose adapter could not be classified, unless another route establishes the path. Loopback stays
+// local whatever the table says.
 enum class DirectPath { kDirect, kNotDirect, kUnknown };
+
+// An on-link route's adapter.
+enum class OnLinkUse {
+    kSkip,     // the adapter is not connected (or gone): the route does not apply
+    kUsable,   // the intended adapter, or one known not to be the tunnel
+    kTunnel,   // the Windscribe tunnel
+    kUnknown   // its connection state could not be read, or it is not in the adapter snapshot
+};
+enum class InterfaceState { kConnected, kDisconnected, kUnknown };
+
+// collectOnLinkRoutes(), per route: the interface's state (GetIpInterfaceEntry; not found counts as
+// gone), whether it is the intended adapter, and the adapter snapshot (GetAdaptersAddresses), which
+// can miss an adapter that appeared since it was taken.
+inline OnLinkUse classifyOnLinkRoute(InterfaceState state, bool isIntendedInterface, bool areAdaptersListed,
+                                     bool isInAdapterList, bool isWindscribeAdapter)
+{
+    if (state == InterfaceState::kDisconnected) {
+        return OnLinkUse::kSkip;
+    }
+    if (state == InterfaceState::kUnknown) {
+        return OnLinkUse::kUnknown;
+    }
+    if (isIntendedInterface) {
+        return OnLinkUse::kUsable;
+    }
+    if (!areAdaptersListed || !isInAdapterList) {
+        return OnLinkUse::kUnknown;
+    }
+    return isWindscribeAdapter ? OnLinkUse::kTunnel : OnLinkUse::kUsable;
+}
 
 template <typename Key>
 struct OnLinkRoute {
     Key prefix;
-    bool isUsable;  // on the intended adapter, or on another adapter known not to be the tunnel
+    OnLinkUse use;
 };
 
 template <typename Key>
@@ -53,12 +85,34 @@ inline DirectPath directPath(const Key &destination, bool isLoopbackDestination,
     if (isLoopbackDestination) {
         return DirectPath::kDirect;
     }
+    bool isUndecided = !isTableRead;
     for (const auto &route : onLinkRoutes) {
-        if (route.prefix == destination && route.isUsable) {
+        if (!(route.prefix == destination)) {
+            continue;
+        }
+        if (route.use == OnLinkUse::kUsable) {
             return DirectPath::kDirect;
         }
+        if (route.use == OnLinkUse::kUnknown) {
+            isUndecided = true;
+        }
     }
-    return isTableRead ? DirectPath::kNotDirect : DirectPath::kUnknown;
+    return isUndecided ? DirectPath::kUnknown : DirectPath::kNotDirect;
+}
+
+// A range entirely within loopback: inside 127.0.0.0/8 with a prefix of at least /8, or exactly
+// ::1/128 (127.0.0.1/7 or ::1/64 also cover other addresses). bytes: 4 or 16, network order.
+inline bool isLoopbackRange(bool isV4, const unsigned char *bytes, int prefixLength)
+{
+    if (isV4) {
+        return bytes[0] == 127 && prefixLength >= 8;
+    }
+    for (int i = 0; i < 15; ++i) {
+        if (bytes[i] != 0) {
+            return false;
+        }
+    }
+    return bytes[15] == 1 && prefixLength == 128;
 }
 
 enum class DeleteResult { kDeleted, kNotFound, kFailed };

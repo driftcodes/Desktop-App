@@ -50,24 +50,24 @@ bool isOnLink(const MIB_IPFORWARD_ROW2 &row)
     return false;
 }
 
-bool isInterfaceConnected(unsigned long ifIndex, ADDRESS_FAMILY family)
+route_set::InterfaceState interfaceState(unsigned long ifIndex, ADDRESS_FAMILY family)
 {
     MIB_IPINTERFACE_ROW interfaceRow;
     std::memset(&interfaceRow, 0, sizeof(interfaceRow));
     interfaceRow.Family = family;
     interfaceRow.InterfaceIndex = ifIndex;
     DWORD dwErr = GetIpInterfaceEntry(&interfaceRow);
-    if (dwErr != NO_ERROR) {
-        // ERROR_NOT_FOUND is expected if the interface disappears mid-scan; don't warn for it
-        // since this is called once per on-link route row.
-        if (dwErr == ERROR_NOT_FOUND) {
-            spdlog::debug("IpRoutes: GetIpInterfaceEntry(ifIndex={}, family={}) not found", ifIndex, static_cast<int>(family));
-        } else {
-            spdlog::warn("IpRoutes: GetIpInterfaceEntry(ifIndex={}, family={}) failed with error: {}",
-                         ifIndex, static_cast<int>(family), dwErr);
-        }
+    if (dwErr == ERROR_NOT_FOUND) {
+        // The interface disappeared mid-scan: its routes no longer apply.
+        spdlog::debug("IpRoutes: GetIpInterfaceEntry(ifIndex={}, family={}) not found", ifIndex, static_cast<int>(family));
+        return route_set::InterfaceState::kDisconnected;
     }
-    return dwErr == NO_ERROR && interfaceRow.Connected;
+    if (dwErr != NO_ERROR) {
+        spdlog::warn("IpRoutes: GetIpInterfaceEntry(ifIndex={}, family={}) failed with error: {}",
+                     ifIndex, static_cast<int>(family), dwErr);
+        return route_set::InterfaceState::kUnknown;
+    }
+    return interfaceRow.Connected ? route_set::InterfaceState::kConnected : route_set::InterfaceState::kDisconnected;
 }
 
 types::IpAddressRange toRange(const IP_ADDRESS_PREFIX &prefix)
@@ -114,16 +114,17 @@ OnLinkScan collectOnLinkRoutes(unsigned long intendedIfIndex)
         (family == AF_INET ? result.isReadV4 : result.isReadV6) = true;
         for (ULONG i = 0; i < table->NumEntries; ++i) {
             const MIB_IPFORWARD_ROW2 &row = table->Table[i];
-            if (!isOnLink(row) || !isInterfaceConnected(row.InterfaceIndex, family))
+            if (!isOnLink(row))
                 continue;
             const auto dest = toRange(row.DestinationPrefix);
             if (!dest.isValid())
                 continue;
-            // The intended adapter, or one known not to be the tunnel (unknown if the adapters could
-            // not be listed: then only the intended one counts).
-            const bool isUsable = row.InterfaceIndex == intendedIfIndex ||
-                                  (adapters.isListed() && !adapters.isAppVpnAdapter(row.InterfaceIndex));
-            result.routes.push_back({dest, isUsable});
+            const route_set::OnLinkUse use = route_set::classifyOnLinkRoute(
+                interfaceState(row.InterfaceIndex, family), row.InterfaceIndex == intendedIfIndex, adapters.isListed(),
+                adapters.contains(row.InterfaceIndex), adapters.isAppVpnAdapter(row.InterfaceIndex));
+            if (use != route_set::OnLinkUse::kSkip) {
+                result.routes.push_back({dest, use});
+            }
         }
         FreeMibTable(table);
     }
@@ -132,15 +133,11 @@ OnLinkScan collectOnLinkRoutes(unsigned long intendedIfIndex)
 
 bool isLoopbackDestination(const types::IpAddressRange &ip)
 {
-    const types::IpAddress &address = ip.address();
-    if (address.isV4()) {
-        return address.bytes()[0] == 127;
+    const types::IpAddress address = ip.address();
+    if (!address.isV4() && !address.isV6()) {
+        return false;
     }
-    if (address.isV6()) {
-        static const uint8_t kLoopbackV6[16] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
-        return std::memcmp(address.bytes(), kLoopbackV6, 16) == 0;
-    }
-    return false;
+    return route_set::isLoopbackRange(address.isV4(), address.bytes(), ip.prefixLength());
 }
 
 } // namespace
