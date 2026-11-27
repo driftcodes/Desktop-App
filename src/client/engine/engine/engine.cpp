@@ -1618,10 +1618,11 @@ void Engine::onConnectionManagerConnected()
     dnsConfigurator_->applyWhileConnected(connectionManager_->getVpnAdapterInfo(),
                                           connectionManager_->currentProtocol() == types::Protocol::WIREGUARD);
 #ifdef Q_OS_WIN
-    // Required before connected is reported (checked below): with an IPv4-only tunnel and the
-    // firewall off, nothing else keeps ordinary traffic off the physical adapter's IPv6.
-    const bool isIpv6Blocked = helper_->setIPv6EnabledInFirewall(false, engineSettings_.isAllowLanTraffic(),
-                                                                 locationId_.isCustomConfigsLocation());
+    // In place from now on, through the changes below (with an IPv4-only tunnel and the firewall off,
+    // nothing else keeps ordinary traffic off the physical adapter's IPv6). Its result is not what
+    // decides connected: the connect status sent below makes split tunneling rebuild these rules, and
+    // the final check confirms them as rebuilt.
+    helper_->setIPv6EnabledInFirewall(false, engineSettings_.isAllowLanTraffic(), locationId_.isCustomConfigsLocation());
 #endif
 
     // IPv6 summary for split tunneling leak analysis. Both adapters are already dumped in full
@@ -1738,10 +1739,14 @@ void Engine::onConnectionManagerConnected()
         connectionManager_->clickDisconnect(DISCONNECTED_WITH_ERROR);
         return;
     }
-    if (!firewall_policy::ensureStepApplied(isIpv6Blocked, [this]() {
-            return helper_->setIPv6EnabledInFirewall(false, engineSettings_.isAllowLanTraffic(),
-                                                     locationId_.isCustomConfigsLocation());
-        })) {
+    // The IPv6 block for the final split tunneling settings (the connect status above may have
+    // rebuilt it, and a rebuild that failed keeps the earlier rules): requested again now, and its
+    // blocks confirmed, not an earlier success.
+    const auto blockIpv6 = [this]() {
+        return helper_->setIPv6EnabledInFirewall(false, engineSettings_.isAllowLanTraffic(),
+                                                 locationId_.isCustomConfigsLocation());
+    };
+    if (!firewall_policy::ensureStepApplied(blockIpv6(), blockIpv6)) {
         qCCritical(LOG_CONNECTION) << "The IPv6 block could not be applied; disconnecting";
         pendingDisconnectError_ = ConnectError::kDnsLeakProtectionFailed;
         connectionManager_->clickDisconnect(DISCONNECTED_WITH_ERROR);

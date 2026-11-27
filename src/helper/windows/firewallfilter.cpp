@@ -363,7 +363,11 @@ bool FirewallFilter::addFilters(HANDLE engineHandle, const wchar_t *connectingIp
         NET_LUID luid;
         NETIO_STATUS luidRet = ConvertInterfaceIndexToLuid(*it, &luid);
         if (luidRet != NO_ERROR) {
+            // No interface-scoped rule with an unknown interface: the adapter gets no permits (its
+            // traffic stays blocked) and the request is reported incomplete, so the client resends it.
             spdlog::error("FirewallFilter::addFilters(), ConvertInterfaceIndexToLuid failed for ifIndex {}: {}", *it, luidRet);
+            isComplete = false;
+            continue;
         }
 
         // Always allow 10.255.255.0/24 (Windscribe reserved) regardless of custom config,

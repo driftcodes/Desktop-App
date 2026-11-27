@@ -1241,6 +1241,31 @@ void testIpv6PendingUnblockSurvivesSettingsRefresh()
     VERIFY(fw.isBlockInWindows && !fw.isExcludedPermitIn && fw.sync.isPending());
 }
 
+void testIpv6FinalCheckConfirmsRebuiltBlock()
+{
+    // Engine::onConnectionManagerConnected: the early block succeeds; the connect status then makes
+    // split tunneling rebuild it for the per-app rules, and that rebuild fails (the general block
+    // stays, the new per-app block is missing). The final check requests the block again and goes
+    // by that result, not by the early one.
+    FakeIpv6Firewall fw;
+    const bool isEarlyBlockIn = fw.requestBlock();
+    VERIFY(isEarlyBlockIn);
+    fw.failNextCommits = 1;
+    fw.settingsChanged();
+    VERIFY(fw.isBlockInWindows);  // the earlier rules stay
+    VERIFY(fw.sync.isPending());
+
+    // The final check: its request fails too, and so does its retry: not connected.
+    fw.failNextCommits = 2;
+    bool isFinalBlockIn = fw.requestBlock() || fw.requestBlock();
+    VERIFY(!isFinalBlockIn);
+
+    // Once a rebuild for the final settings commits, connected may be shown.
+    fw.failNextCommits = 1;
+    isFinalBlockIn = fw.requestBlock() || fw.requestBlock();
+    VERIFY(isFinalBlockIn && !fw.sync.isPending());
+}
+
 void testIpv6MissingPermitRetriedWithBlockKept()
 {
     // The block commits but Throne's IPv6 permit could not be added: reported as blocked (connected
@@ -1309,6 +1334,7 @@ int main()
     testIpv6UnblockChecksWindowsNotMemory();
     testIpv6PendingUnblockSurvivesSettingsRefresh();
     testIpv6MissingPermitRetriedWithBlockKept();
+    testIpv6FinalCheckConfirmsRebuiltBlock();
     if (g_failures == 0) {
         printf("All scoped permit tests passed.\n");
     }

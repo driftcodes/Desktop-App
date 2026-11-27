@@ -299,7 +299,11 @@ bool Ipv6Firewall::addFilters(HANDLE engineHandle, bool allowLanTraffic, bool is
         NET_LUID luid;
         NETIO_STATUS luidStatus = ConvertInterfaceIndexToLuid(*it, &luid);
         if (luidStatus != NO_ERROR) {
-            spdlog::error("Ipv6Firewall::addFilters(), ConvertInterfaceIndexToLuid failed for ifIndex {}: {}", *it, luidStatus);
+            // No permit with an unknown interface: the adapter is skipped (its IPv6 stays blocked) and
+            // the rebuild is retried, by when it may be known.
+            spdlog::error("Ipv6Firewall::addFilters(), ConvertInterfaceIndexToLuid failed for ifIndex {}: {}; retrying", *it, luidStatus);
+            arePermitsComplete = false;
+            continue;
         }
 
         ret = Utils::addFilterV6(engineHandle, nullptr, FWP_ACTION_PERMIT, 0, subLayerGUID_, FIREWALL_SUBLAYER_IPV6_NAMEW, &luid);
@@ -386,7 +390,9 @@ bool Ipv6Firewall::addFilters(HANDLE engineHandle, bool allowLanTraffic, bool is
                 NET_LUID luid;
                 NETIO_STATUS luidStatus = ConvertInterfaceIndexToLuid(*it, &luid);
                 if (luidStatus != NO_ERROR) {
-                    spdlog::error("Ipv6Firewall::addFilters(), ConvertInterfaceIndexToLuid failed for ifIndex {}: {}", *it, luidStatus);
+                    spdlog::error("Ipv6Firewall::addFilters(), ConvertInterfaceIndexToLuid failed for ifIndex {}: {}; retrying", *it, luidStatus);
+                    arePermitsComplete = false;
+                    continue;
                 }
 
                 ret = Utils::addFilterV6(engineHandle, nullptr, FWP_ACTION_PERMIT, 4, subLayerGUID_, FIREWALL_SUBLAYER_IPV6_NAMEW, &luid);
