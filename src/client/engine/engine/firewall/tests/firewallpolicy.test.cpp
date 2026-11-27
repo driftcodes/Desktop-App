@@ -1330,4 +1330,106 @@ void TestFirewallPolicy::testProxiedSplitTunnelFailureEndsAttemptKeepsSettings()
     QVERIFY(firewall_policy::splitTunnelStartAction(true, true, true, true) == SplitTunnelStartAction::kContinue);
 }
 
+namespace {
+// The Windows helper's split tunneling, as the engine sees it through setSplitTunnelingSettings and
+// the report that comes with each sendConnectStatus.
+struct FakeSplitTunnelHelper {
+    firewall_policy::SplitTunnelState settings;  // what it applies (a fresh one: off, no apps)
+    QStringList unidentifiable;                  // programs it cannot identify (they exist)
+    int settingsSent = 0;
+    void restart() { settings = firewall_policy::SplitTunnelState(); }
+    void setSettings(const firewall_policy::SplitTunnelState &s)
+    {
+        ++settingsSent;
+        settings = s;
+    }
+    bool sendConnectStatus() { return true; }  // the status itself applies
+    firewall_policy::SplitTunnelState report() const
+    {
+        firewall_policy::SplitTunnelState r = settings;
+        for (const QString &app : settings.apps) {
+            if (unidentifiable.contains(app)) {
+                r.areAppsResolved = false;
+            }
+        }
+        return r;
+    }
+    // The exclusions that have rules.
+    QStringList excludedWithRules() const
+    {
+        QStringList apps;
+        for (const QString &app : settings.apps) {
+            if (!unidentifiable.contains(app)) {
+                apps << app;
+            }
+        }
+        return apps;
+    }
+};
+
+firewall_policy::SplitTunnelState throneExclusions()
+{
+    firewall_policy::SplitTunnelState s;
+    s.isActive = true;
+    s.isExclusive = true;
+    s.apps = {"C:/Throne/throne.exe", "C:/Throne/sing-box.exe"};
+    return s;
+}
+
+// Engine::onConnectionManagerConnected for a proxied Exclusive session: whether connected is shown.
+bool connectedAttempt(FakeSplitTunnelHelper &helper, const firewall_policy::SplitTunnelState &requested)
+{
+    const bool isApplied = firewall_policy::ensureSplitTunnelConfirmed(
+        helper.sendConnectStatus(), requested, [&]() { return helper.report(); },
+        [&]() { helper.setSettings(requested); return helper.sendConnectStatus(); });
+    return firewall_policy::splitTunnelStartAction(isApplied, true, requested.isActive, requested.isExclusive) ==
+           firewall_policy::SplitTunnelStartAction::kContinue;
+}
+} // namespace
+
+void TestFirewallPolicy::testRestartedHelperSplitTunnelIsReapplied()
+{
+    const firewall_policy::SplitTunnelState requested = throneExclusions();
+    FakeSplitTunnelHelper helper;
+    helper.setSettings(requested);
+
+    // The helper restarts between receiving the settings and the connected status: it reports its
+    // defaults (and the status applied). The settings are sent again, then confirmed.
+    helper.restart();
+    QVERIFY(!firewall_policy::isSplitTunnelConfirmed(requested, helper.report()));
+    QVERIFY(connectedAttempt(helper, requested));
+    QCOMPARE(helper.settingsSent, 2);
+    QCOMPARE(helper.excludedWithRules(), requested.apps);
+
+    // Settings in place from the start: no resend.
+    QVERIFY(connectedAttempt(helper, requested));
+    QCOMPARE(helper.settingsSent, 2);
+
+    // A helper that keeps losing them (it restarts again during the resend): not connected.
+    struct Restarting : FakeSplitTunnelHelper {
+        bool sendConnectStatus() { restart(); return true; }
+    } restarting;
+    const bool isApplied = firewall_policy::ensureSplitTunnelConfirmed(
+        restarting.sendConnectStatus(), requested, [&]() { return restarting.report(); },
+        [&]() { restarting.setSettings(requested); return restarting.sendConnectStatus(); });
+    QVERIFY(!isApplied);
+}
+
+void TestFirewallPolicy::testUnresolvedExcludedAppIsNotConfirmed()
+{
+    // throne.exe is identified, sing-box.exe (the core that reaches the VLESS server) is not.
+    const firewall_policy::SplitTunnelState requested = throneExclusions();
+    FakeSplitTunnelHelper helper;
+    helper.setSettings(requested);
+    helper.unidentifiable = {"C:/Throne/sing-box.exe"};
+    QVERIFY(!connectedAttempt(helper, requested));  // the resend does not help: the attempt ends
+    QCOMPARE(helper.excludedWithRules(), QStringList({"C:/Throne/throne.exe"}));
+    QCOMPARE(requested.apps.size(), 2);  // the saved exclusions are untouched
+
+    // The next attempt, once it can be identified, uses both exclusions.
+    helper.unidentifiable.clear();
+    QVERIFY(connectedAttempt(helper, requested));
+    QCOMPARE(helper.excludedWithRules(), requested.apps);
+}
+
 QTEST_MAIN(TestFirewallPolicy)

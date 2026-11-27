@@ -4,6 +4,7 @@
 #include <QtGlobal>
 #include <QSet>
 #include <QString>
+#include <QStringList>
 #include "types/enums.h"
 
 class FirewallController;
@@ -56,6 +57,38 @@ inline bool shouldApplyConnectedFirewall(bool isWanted, bool isActuallyOnQuery)
 // Before reporting connected: like ensureFirewallReady, but the request applied completely must be the
 // connected-state one (resendConnected() sends it). A complete connecting-state firewall is not.
 bool ensureConnectedFirewallReady(FirewallController &controller, const std::function<void()> &resendConnected);
+
+// Split tunneling settings: what the engine asked the helper for, or what the helper reports it
+// applies (areAppsResolved false: an excluded program that exists could not be identified, so its
+// rules are missing).
+struct SplitTunnelState
+{
+    bool isActive = false;
+    bool isExclusive = false;
+    QStringList apps;
+    bool areAppsResolved = true;
+};
+
+// Whether the helper applies what was asked for. A helper that restarted runs on its defaults (split
+// tunneling off, no apps) until it is sent the settings again, and its connect status still succeeds.
+inline bool isSplitTunnelConfirmed(const SplitTunnelState &requested, const SplitTunnelState &applied)
+{
+    return applied.isActive == requested.isActive && applied.isExclusive == requested.isExclusive &&
+           applied.apps == requested.apps && applied.areAppsResolved;
+}
+
+// The connected status for a session that depends on its exclusions (proxied, Exclusive): applied
+// and confirmed, or, once, the settings sent again with the status (reapplyAndResend returns the
+// status's result; applied() reads the helper's latest report).
+inline bool ensureSplitTunnelConfirmed(bool isStatusApplied, const SplitTunnelState &requested,
+                                       const std::function<SplitTunnelState()> &applied,
+                                       const std::function<bool()> &reapplyAndResend)
+{
+    if (isStatusApplied && isSplitTunnelConfirmed(requested, applied())) {
+        return true;
+    }
+    return reapplyAndResend() && isSplitTunnelConfirmed(requested, applied());
+}
 
 // The helper's answer to the connected-state split tunneling settings (sendConnectStatus). Upstream a
 // failure only warns, and the GUI turns split tunneling off. For a session with a proxy and Exclusive

@@ -148,7 +148,9 @@ std::string sendConnectStatus(const std::string &pars)
 
     bool success = SplitTunneling::instance().setConnectStatus(connectStatus);
     g_SplitTunnelingPars.isVpnConnected = connectStatus.isConnected;
-    return serializeResult(success);
+    // Followed by the split tunneling settings this helper applied (see SplitTunneling::Confirmation).
+    const SplitTunneling::Confirmation applied = SplitTunneling::instance().confirmation();
+    return serializeResult(success, applied.isEnabled, applied.isExclude, applied.apps, applied.areAppsResolved);
 }
 
 std::string changeMtu(const std::string &pars)

@@ -4,6 +4,7 @@
 #include <ws2def.h>
 
 #include "helper_base.h"
+#include "firewall/firewallpolicy.h"
 #include "types/protocol.h"
 
 class AdapterGatewayInfo;
@@ -30,6 +31,8 @@ public:
                            const QString &connectedIp, const types::Protocol &protocol,
                            const QStringList &dnsWhitelistIps = QStringList(),
                            bool isVpnSessionActive = false);
+    // The split tunneling settings the helper reported applying with the last sendConnectStatus.
+    firewall_policy::SplitTunnelState lastAppliedSplitTunnel() const { return lastAppliedSplitTunnel_; }
     void changeMtu(const QString &adapter, int mtu);
     // OpenVPN chooses its own management port; on success outPort/outPid receive the OS-assigned
     // management port and the OpenVPN PID, which the engine uses to verify the management peer.
@@ -123,5 +126,6 @@ public:
     void installerCleanupStaged();
 
 private:
+    firewall_policy::SplitTunnelState lastAppliedSplitTunnel_;
     QStringList customDnsIp_;
 };

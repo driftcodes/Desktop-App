@@ -367,6 +367,9 @@ private:
     // The split tunneling settings last sent to the helper (setSplitTunnelingSettingsImpl).
     bool isSplitTunnelActive_ = false;
     bool isSplitTunnelExclude_ = false;
+    QStringList splitTunnelFiles_;
+    QStringList splitTunnelIps_;
+    QStringList splitTunnelHosts_;
     // Set when the engine stops a session itself with an error (see onConnectionManagerConnected).
     ConnectError pendingDisconnectError_ = ConnectError::kNoError;
 

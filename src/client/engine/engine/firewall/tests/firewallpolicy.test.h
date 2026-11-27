@@ -39,4 +39,6 @@ private slots:
     void testDnsLeakFilterKeptAfterErrorUntilFirewallOff();
     void testIpv6BlockGatesConnected();
     void testProxiedSplitTunnelFailureEndsAttemptKeepsSettings();
+    void testRestartedHelperSplitTunnelIsReapplied();
+    void testUnresolvedExcludedAppIsNotConfirmed();
 };

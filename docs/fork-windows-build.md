@@ -193,6 +193,10 @@ Emergency Connect is unchanged and never uses the proxy.
   tunneling settings, the app disconnects with an error you can retry. It no longer stays connected
   and turns split tunneling off in Preferences: your settings and exclusions are kept for the next
   attempt. Without a proxy, or in Inclusive mode, the official app's handling is unchanged.
+  "Applied" means the helper reports exactly your settings, mode and excluded programs, each one
+  identified by Windows. If it does not (for example, the helper service restarted and lost them),
+  the app sends them again once before giving up. A program in the list that no longer exists on disk
+  is skipped rather than counted as a failure.
 - **IPv6 while connected.** Windows blocks IPv6 outside the tunnel whenever you are connected, even
   with the firewall off. The app now waits for that block, as rebuilt for the final split tunneling
   settings, before it shows Connected. If the block cannot be installed (after one retry), it

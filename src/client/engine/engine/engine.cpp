@@ -1643,12 +1643,32 @@ void Engine::onConnectionManagerConnected()
                                << "; IpStack mode:" << enumToString(engineSettings_.ipStackEgress());
     }
 
-    bool result = helper_->sendConnectStatus(true, engineSettings_.isTerminateSockets(), engineSettings_.isAllowLanTraffic(),
-                                             connectionManager_->getDefaultAdapterInfo(), connectionManager_->getVpnAdapterInfo(),
-                                             connectionManager_->getLastConnectedIp(), lastConnectingProtocol_,
-                                             dnsConfigurator_->dnsWhitelistIps());
+    const auto sendConnectedStatus = [this]() {
+        return helper_->sendConnectStatus(true, engineSettings_.isTerminateSockets(), engineSettings_.isAllowLanTraffic(),
+                                          connectionManager_->getDefaultAdapterInfo(), connectionManager_->getVpnAdapterInfo(),
+                                          connectionManager_->getLastConnectedIp(), lastConnectingProtocol_,
+                                          dnsConfigurator_->dnsWhitelistIps());
+    };
+    bool result = sendConnectedStatus();
 #ifdef Q_OS_WIN
     const bool isProxiedSession = requestProxySettings().isProxyEnabled();
+    if (isProxiedSession && isSplitTunnelActive_ && isSplitTunnelExclude_) {
+        // Throne and its core depend on their exclusions: the helper must report applying exactly
+        // these settings, every program identified. A helper that restarted runs on its defaults and
+        // still reports the status applied; the settings are sent again once, then it is checked again.
+        firewall_policy::SplitTunnelState requested;
+        requested.isActive = isSplitTunnelActive_;
+        requested.isExclusive = isSplitTunnelExclude_;
+        requested.apps = splitTunnelFiles_;
+        result = firewall_policy::ensureSplitTunnelConfirmed(
+            result, requested, [this]() { return helper_->lastAppliedSplitTunnel(); },
+            [this, &sendConnectedStatus]() {
+                qCWarning(LOG_CONNECTION) << "The helper does not report the requested split tunneling settings; sending them again";
+                helper_->setSplitTunnelingSettings(isSplitTunnelActive_, isSplitTunnelExclude_, engineSettings_.isAllowLanTraffic(),
+                                                   splitTunnelFiles_, splitTunnelIps_, splitTunnelHosts_);
+                return sendConnectedStatus();
+            });
+    }
 #else
     const bool isProxiedSession = false;  // upstream handling
 #endif
@@ -2701,6 +2721,9 @@ void Engine::setSplitTunnelingSettingsImpl(bool isActive, bool isExclude, const 
     WS_ASSERT(helper_ != NULL);
     isSplitTunnelActive_ = isActive;
     isSplitTunnelExclude_ = isExclude;
+    splitTunnelFiles_ = files;
+    splitTunnelIps_ = ips;
+    splitTunnelHosts_ = hosts;
     helper_->setSplitTunnelingSettings(isActive, isExclude, engineSettings_.isAllowLanTraffic(), files, ips, hosts);
 
 #ifdef Q_OS_MACOS

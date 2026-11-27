@@ -20,6 +20,7 @@ AppsIds::~AppsIds()
 void AppsIds::setFromList(const std::vector<std::wstring> &apps)
 {
     clear();
+    unresolved_.clear();
     addFromListImpl(apps);
 }
 
@@ -106,6 +107,11 @@ void AppsIds::addFromListImpl(const std::vector<std::wstring> &apps)
         }
         else {
             spdlog::error(L"FwpmGetAppIdFromFileName({}) failed: {}", it->c_str(), result);
+            const DWORD attributes = ::GetFileAttributesW(it->c_str());
+            const DWORD attributesError = attributes == INVALID_FILE_ATTRIBUTES ? ::GetLastError() : ERROR_SUCCESS;
+            if (attributesError != ERROR_FILE_NOT_FOUND && attributesError != ERROR_PATH_NOT_FOUND) {
+                unresolved_.push_back(*it);
+            }
         }
     }
 }

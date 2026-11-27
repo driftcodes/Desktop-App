@@ -80,7 +80,18 @@ bool Helper_win::sendConnectStatus(bool isConnected, bool isTerminateSocket, boo
                               isConnected || isVpnSessionActive);
 
     bool success = false;
-    deserializeAnswer(result, success);
+    bool isEnabled = false;
+    bool isExclude = false;
+    std::vector<std::wstring> apps;
+    bool areAppsResolved = false;  // no report: not confirmed
+    deserializeAnswer(result, success, isEnabled, isExclude, apps, areAppsResolved);
+    lastAppliedSplitTunnel_ = firewall_policy::SplitTunnelState();
+    lastAppliedSplitTunnel_.isActive = isEnabled;
+    lastAppliedSplitTunnel_.isExclusive = isExclude;
+    for (const auto &app : apps) {
+        lastAppliedSplitTunnel_.apps << QString::fromStdWString(app);
+    }
+    lastAppliedSplitTunnel_.areAppsResolved = areAppsResolved;
     return success;
 }
 

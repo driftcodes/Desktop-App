@@ -22,6 +22,16 @@ public:
     bool setConnectStatus(ConnectStatus& connectStatus);
     bool updateState();
 
+    // What this helper applies, for the client to compare with what it asked for: a helper that
+    // restarted runs on its defaults (split tunneling off, no apps) until the client sends them again.
+    struct Confirmation {
+        bool isEnabled;
+        bool isExclude;
+        std::vector<std::wstring> apps;
+        bool areAppsResolved;
+    };
+    Confirmation confirmation() const { return {isSplitTunnelEnabled_, isExclude_, apps_, unresolvedApps_.empty()}; }
+
     static void removeAllFilters(FwpmWrapper& fwmpWrapper);
 
     // Looks for Windscribe's programs again when none could be identified at service start (the
@@ -43,6 +53,7 @@ private:
     bool isExclude_ = false;
     bool isAllowLanTraffic_ = false;
     std::vector<std::wstring> apps_;
+    std::vector<std::wstring> unresolvedApps_;
     bool prevIsSplitTunnelActive_ = false;
     bool prevIsExclude_ = false;
     // LUID of the VPN adapter of the last connected state. Kept after disconnect: a "default

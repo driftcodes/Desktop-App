@@ -231,6 +231,12 @@ bool SplitTunneling::updateState()
     spdlog::debug("SplitTunneling::updateState begin");
     AppsIds appsIds;
     appsIds.setFromList(apps_);
+    // An excluded program that exists but could not be identified has no rules: reported in the
+    // confirmation (a proxied Exclusive session does not count its settings as applied then).
+    unresolvedApps_ = appsIds.unresolved();
+    for (const auto &app : unresolvedApps_) {
+        spdlog::error(L"SplitTunneling::updateState(), could not identify {}; its rules are missing", app);
+    }
     // The DNS leak filter lets Exclusive-mode excluded apps (Throne) reach the adapter's DNS servers
     // while a proxied session is not connected; they bypass the VPN by the user's choice.
     DnsFirewall::instance().setExcludedAppsIds(isSplitTunnelEnabled_ && isExclude_ ? appsIds : AppsIds());
